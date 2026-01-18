@@ -1,0 +1,120 @@
+:root {
+  --bg: #0b1020;
+  --card: #121a33;
+  --text: #eaf0ff;
+  --muted: #a9b3d1;
+  --accent: #7aa2ff;
+  --border: #22305a;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+  background: radial-gradient(1200px 800px at 20% 0%, #16224a, var(--bg));
+  color: var(--text);
+}
+
+.container {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 12px;
+  margin-bottom: 16px;
+}
+
+.header a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.chat {
+  background: rgba(18, 26, 51, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  backdrop-filter: blur(10px);
+}
+
+.messages {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 380px;
+  padding: 8px;
+}
+
+.msg {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(11, 16, 32, 0.6);
+}
+
+.msg .role {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.composer {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.composer input {
+  flex: 1;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(11, 16, 32, 0.6);
+  color: var(--text);
+}
+
+button {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--accent);
+  color: #07102a;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.card {
+  background: rgba(18, 26, 51, 0.55);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  backdrop-filter: blur(10px);
+}
+
+.donate-form {
+  display: grid;
+  gap: 12px;
+  max-width: 420px;
+}
+
+.donate-form input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(11, 16, 32, 0.6);
+  color: var(--text);
+}
+
+.hint {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}

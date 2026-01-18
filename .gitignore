@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+.env
+.env.*
+!.env.example
+
+.venv/
+venv/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# Chroma persistence
+data/
+
+# OS / editor
+.DS_Store
+.vscode/

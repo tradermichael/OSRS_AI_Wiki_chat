@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Donate — OSRS AI Wiki Chat</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Donate</h1>
+      <nav>
+        <a href="/">Chat</a>
+      </nav>
+    </header>
+
+    <main class="card">
+      <p>Support the bot with a PayPal donation.</p>
+
+      <form id="donateForm" class="donate-form">
+        <label>
+          Amount (USD)
+          <input id="amount" value="5.00" />
+        </label>
+        <label>
+          Note (optional)
+          <input id="note" placeholder="Thanks for the help!" />
+        </label>
+        <button type="submit">Continue to PayPal</button>
+      </form>
+
+      <p class="hint">
+        Uses server-side PayPal Orders API. Configure `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`.
+      </p>
+    </main>
+  </div>
+
+  <script src="/static/donate.js"></script>
+</body>
+</html>

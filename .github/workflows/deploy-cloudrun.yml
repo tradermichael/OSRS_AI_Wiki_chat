@@ -1,0 +1,67 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  SERVICE_NAME: osrs-ai-wiki-chat
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth
+        run: |
+          gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push image
+        run: |
+          PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
+          REGION="${{ secrets.GCP_REGION }}"
+          REPO="${{ secrets.GCP_ARTIFACT_REPO }}"
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "${{ env.SERVICE_NAME }}" \
+            --image "$IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --platform managed \
+            --allow-unauthenticated \
+            --service-account "${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT_EMAIL }}" \
+            --set-env-vars "APP_ENV=prod,RAG_DB_PATH=/tmp/rag.sqlite,RAG_TOP_K=5,VERTEX_LOCATION=${{ secrets.GCP_VERTEX_LOCATION }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}" \
+            --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }}" \
+            --set-env-vars "PAYPAL_ENV=${{ secrets.PAYPAL_ENV }}" \
+            --set-env-vars "PAYPAL_CLIENT_ID=${{ secrets.PAYPAL_CLIENT_ID }}" \
+            --set-env-vars "PAYPAL_CLIENT_SECRET=${{ secrets.PAYPAL_CLIENT_SECRET }}" \
+            --set-env-vars "PAYPAL_RETURN_URL=${{ secrets.PAYPAL_RETURN_URL }}" \
+            --set-env-vars "PAYPAL_CANCEL_URL=${{ secrets.PAYPAL_CANCEL_URL }}"
+
+      - name: Show service URL
+        run: |
+          gcloud run services describe "${{ env.SERVICE_NAME }}" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --format='value(status.url)'

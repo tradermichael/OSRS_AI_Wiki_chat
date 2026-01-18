@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    app_env: str = "dev"
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+
+    google_cloud_project: str | None = None
+    vertex_location: str = "us-central1"
+    gemini_model: str = "gemini-1.5-flash-002"
+
+    rag_db_path: str = "./data/rag.sqlite"
+    rag_top_k: int = 5
+
+    paypal_env: str = "sandbox"  # sandbox|live
+    paypal_client_id: str | None = None
+    paypal_client_secret: str | None = None
+    paypal_return_url: str = "http://localhost:8000/donate/success"
+    paypal_cancel_url: str = "http://localhost:8000/donate/cancel"
+
+
+settings = Settings()

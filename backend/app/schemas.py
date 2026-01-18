@@ -1,0 +1,37 @@
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    session_id: str | None = Field(default=None, max_length=128)
+
+
+class SourceChunk(BaseModel):
+    title: str | None = None
+    url: str
+    text: str
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    sources: list[SourceChunk] = []
+
+
+class CreatePayPalOrderRequest(BaseModel):
+    amount_usd: str = Field(
+        ..., pattern=r"^\d+(?:\.\d{1,2})?$", description="Amount like 5 or 5.00"
+    )
+    note: str | None = Field(default=None, max_length=140)
+
+
+class CreatePayPalOrderResponse(BaseModel):
+    order_id: str
+    approve_url: str
+
+
+class CapturePayPalOrderResponse(BaseModel):
+    order_id: str
+    status: str
+    payer_email: str | None = None

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OSRS AI Wiki Chat</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>OSRS AI Wiki Chat</h1>
+      <nav>
+        <a href="/donate">Donate</a>
+      </nav>
+    </header>
+
+    <main class="chat">
+      <div id="messages" class="messages"></div>
+      <form id="chatForm" class="composer">
+        <input id="message" placeholder="Ask something about OSRS..." autocomplete="off" />
+        <button type="submit">Send</button>
+      </form>
+      <div class="hint">
+        Uses RAG over your ingested wiki chunks. Configure Gemini via Vertex AI env vars.
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,17 @@
+Required GitHub Secrets for deploy workflow:
+
+GCP_PROJECT_ID=
+GCP_REGION=us-central1
+GCP_VERTEX_LOCATION=us-central1
+GCP_ARTIFACT_REPO=osrs-ai-wiki-chat
+GCP_WORKLOAD_IDENTITY_PROVIDER=projects/1234567890/locations/global/workloadIdentityPools/.../providers/...
+GCP_SERVICE_ACCOUNT_EMAIL=osrs-ai-wiki-chat-deployer@YOUR_PROJECT.iam.gserviceaccount.com
+GCP_RUNTIME_SERVICE_ACCOUNT_EMAIL=osrs-ai-wiki-chat-runtime@YOUR_PROJECT.iam.gserviceaccount.com
+
+GEMINI_MODEL=gemini-2.5-flash
+
+PAYPAL_ENV=sandbox
+PAYPAL_CLIENT_ID=
+PAYPAL_CLIENT_SECRET=
+PAYPAL_RETURN_URL=https://YOUR_CLOUD_RUN_URL/donate/success
+PAYPAL_CANCEL_URL=https://YOUR_CLOUD_RUN_URL/donate/cancel
