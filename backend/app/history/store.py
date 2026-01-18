@@ -60,6 +60,9 @@ class PublicChatStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_public_chat_created_at ON public_chat(created_at DESC)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_public_chat_session_id ON public_chat(session_id, id DESC)"
+            )
             conn.commit()
 
     def add(
@@ -115,6 +118,48 @@ class PublicChatStore:
                 videos = json.loads(r["videos_json"] or "[]")
             except Exception:
                 videos = []
+            out.append(
+                PublicChatRecord(
+                    id=str(int(r["id"])),
+                    created_at=str(r["created_at"]),
+                    session_id=r["session_id"],
+                    user_message=str(r["user_message"]),
+                    bot_answer=str(r["bot_answer"]),
+                    sources=list(sources) if isinstance(sources, list) else [],
+                    videos=list(videos) if isinstance(videos, list) else [],
+                )
+            )
+        return out
+
+    def list_by_session(self, *, session_id: str, limit: int = 10) -> list[PublicChatRecord]:
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return []
+        limit = max(1, min(int(limit), 50))
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, created_at, session_id, user_message, bot_answer, sources_json, videos_json
+                FROM public_chat
+                WHERE session_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (session_id, limit),
+            ).fetchall()
+
+        out: list[PublicChatRecord] = []
+        for r in rows:
+            try:
+                sources = json.loads(r["sources_json"] or "[]")
+            except Exception:
+                sources = []
+            try:
+                videos = json.loads(r["videos_json"] or "[]")
+            except Exception:
+                videos = []
+
             out.append(
                 PublicChatRecord(
                     id=str(int(r["id"])),

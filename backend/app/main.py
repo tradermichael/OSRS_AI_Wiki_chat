@@ -135,9 +135,61 @@ async def chat(req: ChatRequest):
     prefixes = allowed_url_prefixes()
     history_store = get_public_chat_store()
 
+    def _needs_pronoun_resolution(message: str) -> bool:
+        m = (message or "").strip().lower()
+        if not m:
+            return False
+        if len(m) > 140:
+            return False
+        pronouns = (
+            " it ",
+            " this ",
+            " that ",
+            " these ",
+            " those ",
+            " he ",
+            " she ",
+            " her ",
+            " him ",
+            " they ",
+            " them ",
+            " their ",
+            " there ",
+        )
+        padded = f" {m} "
+        return any(p in padded for p in pronouns)
+
+    # Pull a small amount of per-session context so follow-ups like "how do I beat her" work.
+    prior_turns = []
+    if req.session_id:
+        try:
+            prior_turns = history_store.list_by_session(session_id=req.session_id, limit=4)
+        except Exception:
+            prior_turns = []
+
+    conversation_context = ""
+    if prior_turns:
+        # list_by_session returns newest-first; prompt wants oldest-first.
+        lines: list[str] = []
+        for t in reversed(prior_turns[-3:]):
+            um = (t.user_message or "").strip()
+            ba = (t.bot_answer or "").strip()
+            if um:
+                lines.append(f"User: {um}")
+            if ba:
+                lines.append(f"Assistant: {ba}")
+        conversation_context = "\n".join(lines).strip()
+
+    prev_user_message = (prior_turns[0].user_message if prior_turns else "") or ""
+    pronoun_followup = bool(prev_user_message and _needs_pronoun_resolution(req.message))
+
     # If the user asks for "latest"/"current" info, skip the answer cache.
     msg_l = (req.message or "").lower()
     force_fresh = any(w in msg_l for w in ("latest", "today", "current", "new", "update"))
+
+    # Context-dependent follow-ups ("her", "that", "it") should not be served from cache.
+    if pronoun_followup:
+        force_fresh = True
 
     # Fast path: reuse a previously-generated, cited answer for similar questions.
     cached = None if force_fresh else AnswerCacheStore().find_similar(
@@ -176,7 +228,13 @@ async def chat(req: ChatRequest):
         return ChatResponse(answer=cached.answer, sources=sources, history_id=str(history_id), videos=videos)
 
     store = RAGStore()
-    queries = derive_search_queries(req.message)
+
+    # For short pronoun follow-ups, augment retrieval with the prior topic.
+    retrieval_seed = req.message
+    if pronoun_followup:
+        retrieval_seed = f"{req.message}\n\nPrevious topic: {prev_user_message}".strip()
+
+    queries = derive_search_queries(retrieval_seed)
 
     # Merge top chunks across a few derived queries.
     chunks = []
@@ -195,7 +253,7 @@ async def chat(req: ChatRequest):
     # If we got chunks but they don't mention the core topic terms, treat as weak.
     # This also checks the *leading* terms so we don't miss specific concepts (e.g., "shadow realm")
     # just because generic words like "desert" or "treasure" appear.
-    key_terms = extract_keywords(req.message, max_terms=10)
+    key_terms = extract_keywords(retrieval_seed, max_terms=10)
     key_terms = [t for t in key_terms if len(t) >= 4]
     weak_local = False
     if chunks and key_terms:
@@ -212,7 +270,7 @@ async def chat(req: ChatRequest):
     if not chunks or weak_local or force_fresh:
         live_chunks: list = []
         # Prefer the most focused query (first derived query).
-        primary_q = (queries[0] if queries else req.message)
+        primary_q = (queries[0] if queries else retrieval_seed)
         live_chunks.extend(await live_query_chunks(primary_q, allowed_url_prefixes=prefixes))
         live_chunks = live_chunks[:8]
         if live_chunks:
@@ -267,7 +325,7 @@ async def chat(req: ChatRequest):
     # De-dupe by URL before prompting so citation numbers match what we display.
     # BUT: include multiple relevant excerpts from the same page so we don't miss
     # terms that appear later in the article (e.g., user asks about "shadow realm").
-    key_terms_for_prompt = extract_keywords(req.message, max_terms=10)
+    key_terms_for_prompt = extract_keywords(retrieval_seed, max_terms=10)
 
     url_to_chunks: dict[str, list] = {}
     for c in chunks:
@@ -313,7 +371,12 @@ async def chat(req: ChatRequest):
             )
         )
 
-    prompt = build_rag_prompt(user_message=req.message, chunks=prompt_chunks, allowed_url_prefixes=prefixes)
+    prompt = build_rag_prompt(
+        user_message=req.message,
+        conversation_context=conversation_context,
+        chunks=prompt_chunks,
+        allowed_url_prefixes=prefixes,
+    )
 
     client = GeminiVertexClient()
     try:

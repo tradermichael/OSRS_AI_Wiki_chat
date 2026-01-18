@@ -82,6 +82,42 @@ class FirestorePublicChatStore:
             )
         return out
 
+    def list_by_session(self, *, session_id: str, limit: int = 10) -> list[PublicChatRecord]:
+        from google.cloud import firestore  # type: ignore
+
+        session_id = str(session_id or "").strip()
+        if not session_id:
+            return []
+
+        limit = max(1, min(int(limit), 50))
+        q = (
+            self._col.where("session_id", "==", session_id)
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .limit(limit)
+        )
+
+        out: list[PublicChatRecord] = []
+        for doc in q.stream():
+            d = doc.to_dict() or {}
+            created_at = d.get("created_at")
+            if isinstance(created_at, datetime):
+                created_at_str = created_at.astimezone(timezone.utc).isoformat()
+            else:
+                created_at_str = str(created_at or "")
+
+            out.append(
+                PublicChatRecord(
+                    id=doc.id,
+                    created_at=created_at_str,
+                    session_id=d.get("session_id"),
+                    user_message=str(d.get("user_message") or ""),
+                    bot_answer=str(d.get("bot_answer") or ""),
+                    sources=list(d.get("sources") or []),
+                    videos=list(d.get("videos") or []),
+                )
+            )
+        return out
+
     def get(self, record_id: str) -> PublicChatRecord | None:
         doc = self._col.document(str(record_id)).get()
         if not doc.exists:
