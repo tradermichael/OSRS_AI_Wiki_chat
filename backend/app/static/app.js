@@ -42,12 +42,9 @@ function createRow(kind) {
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
   if (kind === 'bot') {
-    avatar.innerHTML = `<img src="${BOT_AVATAR_SRC}" alt="${BOT_NAME}" />`;
+    avatar.innerHTML = `<img class="bot-avatar" src="${BOT_AVATAR_SRC}" alt="${BOT_NAME}" />`;
   } else {
-    // Simple silhouette for the user
-    avatar.innerHTML = `<svg viewBox="0 0 24 24" width="42" height="42" aria-hidden="true" style="opacity:0.9;display:block;">
-      <path fill="rgba(243,210,122,0.85)" d="M12 12a5 5 0 1 0-5-5 5 5 0 0 0 5 5zm0 2c-4.42 0-8 2.24-8 5v1h16v-1c0-2.76-3.58-5-8-5z"/>
-    </svg>`;
+    avatar.innerHTML = `<img class="user-avatar" src="/static/default_man.png" alt="You" />`;
   }
 
   const bubble = document.createElement('div');
@@ -127,6 +124,51 @@ function renderCitations(bubble, sources) {
     });
     bubble.appendChild(t);
   }
+}
+
+function renderVideos(bubble, videos) {
+  if (!videos || !videos.length) return;
+
+  const box = document.createElement('div');
+  box.className = 'videos';
+
+  const head = document.createElement('div');
+  head.className = 'videos-head';
+  head.textContent = 'Quest videos: ';
+  box.appendChild(head);
+
+  const list = document.createElement('div');
+  list.className = 'videos-list';
+
+  (videos || []).slice(0, 3).forEach((v) => {
+    if (!v || !v.url) return;
+    const item = document.createElement('div');
+    item.className = 'video';
+
+    const a = document.createElement('a');
+    a.className = 'video-title';
+    a.href = String(v.url);
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = String(v.title || v.url);
+    item.appendChild(a);
+
+    const meta = document.createElement('div');
+    meta.className = 'video-meta';
+    const channel = (v.channel ? String(v.channel) : '').trim();
+    meta.textContent = channel ? `YouTube • ${channel}` : 'YouTube';
+    item.appendChild(meta);
+
+    const summary = document.createElement('div');
+    summary.className = 'video-summary';
+    summary.textContent = String(v.summary || '').trim();
+    item.appendChild(summary);
+
+    list.appendChild(item);
+  });
+
+  box.appendChild(list);
+  bubble.appendChild(box);
 }
 
 function setWikiPreviewVisible(visible) {
@@ -237,11 +279,12 @@ function attachFeedbackControls(bubble, historyId) {
   bubble.appendChild(wrap);
 }
 
-function addBotAnswer(answerText, sources, historyId) {
+function addBotAnswer(answerText, sources, historyId, videos) {
   const { row, bubble } = createRow('bot');
   bubble.querySelector('.role').textContent = BOT_NAME;
   bubble.querySelector('.text').textContent = answerText;
   renderCitations(bubble, sources);
+  renderVideos(bubble, videos);
   attachFeedbackControls(bubble, historyId);
   messagesEl.appendChild(row);
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -260,7 +303,16 @@ function saveLiveChat() {
         title: a.textContent,
         url: a.getAttribute('href') || ''
       }));
-      return { kind: me ? 'me' : 'bot', role, text, sources: cites };
+      const vids = Array.from(bubble?.querySelectorAll('.videos .video') || []).map((v) => {
+        const a = v.querySelector('a.video-title');
+        const title = a?.textContent || '';
+        const url = a?.getAttribute('href') || '';
+        const channelText = v.querySelector('.video-meta')?.textContent || '';
+        const channel = channelText.replace(/^YouTube\s*•\s*/i, '').trim() || null;
+        const summary = v.querySelector('.video-summary')?.textContent || '';
+        return { title, url, channel, summary };
+      });
+      return { kind: me ? 'me' : 'bot', role, text, sources: cites, videos: vids };
     });
     localStorage.setItem(LIVE_CHAT_KEY, JSON.stringify(items));
   } catch {
@@ -282,7 +334,7 @@ function loadLiveChat() {
       } else {
         // Stored citations may have "[1] Title" in title; keep as-is.
         const sources = (it.sources || []).map((s) => ({ title: s.title || '', url: s.url || '' }));
-        addBotAnswer(it.text || '', sources, null);
+        addBotAnswer(it.text || '', sources, null, it.videos || []);
       }
     }
     return true;
@@ -315,7 +367,7 @@ function enterHistoryView(item) {
   setComposerEnabled(false);
 
   addMessage('me', 'You', item.user_message);
-  addBotAnswer(item.bot_answer || '(no answer)', item.sources || [], item.id);
+  addBotAnswer(item.bot_answer || '(no answer)', item.sources || [], item.id, item.videos || []);
 }
 
 function exitHistoryView() {
@@ -501,6 +553,9 @@ form.addEventListener('submit', async (e) => {
 
     if (data.sources && data.sources.length) {
       renderCitations(typingBubble, data.sources);
+    }
+    if (data.videos && data.videos.length) {
+      renderVideos(typingBubble, data.videos);
     }
     if (historyId) {
       attachFeedbackControls(typingBubble, historyId);

@@ -7,7 +7,36 @@ from ..core.config import settings
 from .ingest_mediawiki import chunk_page, search_and_fetch
 from .ingest_mediawiki import mediawiki_fetch_plaintext
 from .google_cse import google_cse_search, url_to_title
+from .query_expansion import extract_keywords
 from .store import RetrievedChunk
+
+
+def _chunk_score(text: str, terms: list[str]) -> int:
+    hay = (text or "").lower()
+    return sum(1 for t in (terms or []) if t and t.lower() in hay)
+
+
+def _select_best_page_chunks(
+    page_chunks: list[tuple[str, dict]],
+    *,
+    query: str,
+    max_chunks: int = 3,
+) -> list[tuple[str, dict]]:
+    if not page_chunks:
+        return []
+    max_chunks = max(1, int(max_chunks))
+
+    terms = extract_keywords(query, max_terms=10)
+    if not terms:
+        return page_chunks[:max_chunks]
+
+    scored = sorted(page_chunks, key=lambda p: _chunk_score(p[0], terms), reverse=True)
+    top = scored[:max_chunks]
+
+    # If nothing matches at all, keep the lead chunk for basic context.
+    if top and _chunk_score(top[0][0], terms) == 0:
+        return page_chunks[:max_chunks]
+    return top
 
 
 async def live_query_chunks(
@@ -38,7 +67,8 @@ async def live_query_chunks(
         for page in pages:
             if prefixes and page.url and not page.url.startswith(prefixes):
                 continue
-            for text, meta in chunk_page(page):
+            page_chunks = _select_best_page_chunks(chunk_page(page), query=query, max_chunks=3)
+            for text, meta in page_chunks:
                 out.append(
                     RetrievedChunk(
                         text=text,
@@ -121,7 +151,8 @@ async def live_search_web_and_fetch_chunks(
         if prefixes and page.url and not page.url.startswith(prefixes):
             continue
 
-        for text, meta in chunk_page(page):
+        page_chunks = _select_best_page_chunks(chunk_page(page), query=query, max_chunks=3)
+        for text, meta in page_chunks:
             out.append(
                 RetrievedChunk(
                     text=text,

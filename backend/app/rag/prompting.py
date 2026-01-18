@@ -24,8 +24,8 @@ def build_rag_prompt(
         title = ch.title or "(untitled)"
         url = ch.url or ""
         snippet = (ch.text or "").strip()
-        if len(snippet) > 700:
-            snippet = snippet[:700] + "…"
+        if len(snippet) > 1400:
+            snippet = snippet[:1400] + "…"
         context_lines.append(f"[Source {i}] {title} — {url}\n{snippet}")
 
     context = "\n\n".join(context_lines) if context_lines else "(no sources retrieved)"

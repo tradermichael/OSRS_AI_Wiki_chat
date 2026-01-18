@@ -21,6 +21,7 @@ from .rag.store import RAGStore
 from .rag.store import make_chunk_id
 from .rag.wiki_preview import fetch_wiki_preview
 from .rag.google_cse import url_to_title
+from .rag.youtube import quest_youtube_videos_with_summaries
 from .schemas import (
     CapturePayPalOrderResponse,
     ChatRequest,
@@ -143,6 +144,17 @@ async def chat(req: ChatRequest):
         question=req.message, allowed_url_prefixes=prefixes
     )
     if cached:
+        # If the cached answer is explicitly low-confidence, force a fresh retrieval.
+        ans_l = (cached.answer or "").lower()
+        if any(p in ans_l for p in ("do not know", "don't know", "no mention", "naught of", "cannot find")):
+            cached = None
+    if cached:
+        videos = []
+        try:
+            videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+        except Exception:
+            videos = []
+
         sources = [
             SourceChunk(
                 title=(s or {}).get("title"),
@@ -159,9 +171,9 @@ async def chat(req: ChatRequest):
             user_message=req.message,
             bot_answer=cached.answer,
             sources=[s.model_dump() for s in sources],
-            videos=[],
+            videos=videos,
         )
-        return ChatResponse(answer=cached.answer, sources=sources, history_id=str(history_id), videos=[])
+        return ChatResponse(answer=cached.answer, sources=sources, history_id=str(history_id), videos=videos)
 
     store = RAGStore()
     queries = derive_search_queries(req.message)
@@ -181,14 +193,19 @@ async def chat(req: ChatRequest):
     chunks = chunks[:8]
 
     # If we got chunks but they don't mention the core topic terms, treat as weak.
-    key_terms = extract_keywords(req.message)
+    # This also checks the *leading* terms so we don't miss specific concepts (e.g., "shadow realm")
+    # just because generic words like "desert" or "treasure" appear.
+    key_terms = extract_keywords(req.message, max_terms=10)
     key_terms = [t for t in key_terms if len(t) >= 4]
     weak_local = False
     if chunks and key_terms:
         hay = "\n".join(((c.title or "") + "\n" + (c.text or "")) for c in chunks).lower()
-        hits = sum(1 for t in key_terms if t in hay)
-        # Require at least one meaningful term to appear in the retrieved context.
-        weak_local = hits == 0
+        hits_all = sum(1 for t in key_terms if t in hay)
+        primary_terms = key_terms[:2]
+        hits_primary = sum(1 for t in primary_terms if t in hay)
+
+        # Require at least one primary term AND at least one meaningful term overall.
+        weak_local = (hits_all == 0) or (hits_primary == 0)
 
     # If the local SQLite/BM25 store has nothing (common on fresh deploys),
     # live-query the configured wiki sources and cache the chunks.
@@ -248,20 +265,53 @@ async def chat(req: ChatRequest):
                     pass
 
     # De-dupe by URL before prompting so citation numbers match what we display.
-    prompt_chunks = []
-    prompt_seen: set[str] = set()
+    # BUT: include multiple relevant excerpts from the same page so we don't miss
+    # terms that appear later in the article (e.g., user asks about "shadow realm").
+    key_terms_for_prompt = extract_keywords(req.message, max_terms=10)
+
+    url_to_chunks: dict[str, list] = {}
     for c in chunks:
         u = (c.url or "").strip()
         if not u:
             continue
         if prefixes and not u.startswith(tuple(prefixes)):
             continue
-        if u in prompt_seen:
+        url_to_chunks.setdefault(u, []).append(c)
+
+    def _chunk_score(text: str) -> int:
+        hay = (text or "").lower()
+        return sum(1 for t in key_terms_for_prompt if t and t.lower() in hay)
+
+    # Rank pages by their best matching chunk score.
+    ranked_urls = sorted(
+        url_to_chunks.keys(),
+        key=lambda u: max((_chunk_score((c.text or "")) for c in url_to_chunks.get(u, [])), default=0),
+        reverse=True,
+    )
+
+    prompt_chunks = []
+    for u in ranked_urls[:6]:
+        cs = url_to_chunks.get(u) or []
+        if not cs:
             continue
-        prompt_seen.add(u)
-        prompt_chunks.append(c)
-        if len(prompt_chunks) >= 6:
-            break
+
+        # Pick a few best chunks from this page.
+        ranked_chunks = sorted(cs, key=lambda c: _chunk_score((c.text or "")), reverse=True)
+        picked = ranked_chunks[:3]
+        merged_text = "\n\n".join(((c.text or "").strip()) for c in picked if (c.text or "").strip())
+        merged_text = merged_text.strip()
+
+        # Cap merged context per URL to keep prompts bounded.
+        if len(merged_text) > 2200:
+            merged_text = merged_text[:2200] + "…"
+
+        prompt_chunks.append(
+            type(cs[0])(
+                text=merged_text or (cs[0].text or ""),
+                url=u,
+                title=cs[0].title,
+            )
+        )
 
     prompt = build_rag_prompt(user_message=req.message, chunks=prompt_chunks, allowed_url_prefixes=prefixes)
 
@@ -274,6 +324,13 @@ async def chat(req: ChatRequest):
             "Gemini (Vertex AI) is not configured yet. "
             "Set GOOGLE_CLOUD_PROJECT (and authenticate with gcloud) to enable LLM answers."
         )
+
+        videos = []
+        try:
+            videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+        except Exception:
+            videos = []
+
         sources = []
         for c in prompt_chunks[:5]:
             if not c.url:
@@ -284,9 +341,14 @@ async def chat(req: ChatRequest):
             user_message=req.message,
             bot_answer=f"{fallback}\n\nError: {exc}",
             sources=[s.model_dump() for s in sources],
-            videos=[],
+            videos=videos,
         )
-        return ChatResponse(answer=f"{fallback}\n\nError: {exc}", sources=sources, history_id=str(history_id), videos=[])
+        return ChatResponse(
+            answer=f"{fallback}\n\nError: {exc}",
+            sources=sources,
+            history_id=str(history_id),
+            videos=videos,
+        )
 
     # Attach a small thumbnail per cited URL (best-effort) so the UI can show relevant images.
     # This is intentionally limited to a few sources to keep latency reasonable.
@@ -340,25 +402,35 @@ async def chat(req: ChatRequest):
         )
 
     # Store a cited copy for faster future retrieval.
+    # Avoid caching explicit "I can't find it" answers so future runs will re-research.
     if sources:
         try:
-            AnswerCacheStore().add(
-                question=req.message,
-                answer=res.text,
-                sources=[s.model_dump() for s in sources],
-            )
+            ans_l = (res.text or "").lower()
+            if not any(p in ans_l for p in ("do not know", "don't know", "no mention", "naught of", "cannot find")):
+                AnswerCacheStore().add(
+                    question=req.message,
+                    answer=res.text,
+                    sources=[s.model_dump() for s in sources],
+                )
         except Exception:
             pass
+
+    # Quest-only YouTube results (best-effort; doesn't block the core answer).
+    videos = []
+    try:
+        videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+    except Exception:
+        videos = []
 
     history_id = history_store.add(
         session_id=req.session_id,
         user_message=req.message,
         bot_answer=res.text,
         sources=[s.model_dump() for s in sources],
-        videos=[],
+        videos=videos,
     )
 
-    return ChatResponse(answer=res.text, sources=sources, history_id=str(history_id), videos=[])
+    return ChatResponse(answer=res.text, sources=sources, history_id=str(history_id), videos=videos)
 
 
 @app.get("/api/history", response_model=PublicHistoryListResponse)
