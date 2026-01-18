@@ -14,6 +14,7 @@ class PublicChatRecord:
     user_message: str
     bot_answer: str
     sources: list[dict]
+    videos: list[dict]
 
 
 class FirestorePublicChatStore:
@@ -32,6 +33,7 @@ class FirestorePublicChatStore:
         user_message: str,
         bot_answer: str,
         sources: list[dict],
+        videos: list[dict] | None = None,
     ) -> str:
         created_at_dt = datetime.now(timezone.utc)
         doc_ref = self._col.document()  # auto id
@@ -42,6 +44,7 @@ class FirestorePublicChatStore:
                 "user_message": user_message,
                 "bot_answer": bot_answer,
                 "sources": sources or [],
+                "videos": videos or [],
             }
         )
         return doc_ref.id
@@ -74,6 +77,7 @@ class FirestorePublicChatStore:
                     user_message=str(d.get("user_message") or ""),
                     bot_answer=str(d.get("bot_answer") or ""),
                     sources=list(d.get("sources") or []),
+                    videos=list(d.get("videos") or []),
                 )
             )
         return out
@@ -96,4 +100,5 @@ class FirestorePublicChatStore:
             user_message=str(d.get("user_message") or ""),
             bot_answer=str(d.get("bot_answer") or ""),
             sources=list(d.get("sources") or []),
+            videos=list(d.get("videos") or []),
         )

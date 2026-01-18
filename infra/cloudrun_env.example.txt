@@ -14,6 +14,9 @@ GEMINI_MODEL=gemini-2.5-flash
 GOOGLE_CSE_API_KEY=
 GOOGLE_CSE_CX=
 
+# YouTube Data API v3 (optional)
+GCP_YT_API_KEY=
+
 # Public chat history persistence
 HISTORY_BACKEND=firestore
 FIRESTORE_COLLECTION=public_chat

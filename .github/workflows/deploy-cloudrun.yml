@@ -56,6 +56,7 @@ jobs:
           PROJECT_ID_VALUE="$(printf '%s' "${{ secrets.GCP_PROJECT_ID }}" | tr -d '\r\n')"
           GOOGLE_CSE_API_KEY_VALUE="$(printf '%s' "${{ secrets.GOOGLE_CSE_API_KEY }}" | tr -d '\r\n')"
           GOOGLE_CSE_CX_VALUE="$(printf '%s' "${{ secrets.GOOGLE_CSE_CX }}" | tr -d '\r\n')"
+          YOUTUBE_API_KEY_VALUE="$(printf '%s' "${{ secrets.GCP_YT_API_KEY }}" | tr -d '\r\n')"
 
           gcloud run deploy "${{ env.SERVICE_NAME }}" \
             --image "$IMAGE" \
@@ -67,6 +68,7 @@ jobs:
             --set-env-vars "GOOGLE_CLOUD_PROJECT=${PROJECT_ID_VALUE}" \
             --set-env-vars "GOOGLE_CSE_API_KEY=${GOOGLE_CSE_API_KEY_VALUE}" \
             --set-env-vars "GOOGLE_CSE_CX=${GOOGLE_CSE_CX_VALUE}" \
+            --set-env-vars "YOUTUBE_API_KEY=${YOUTUBE_API_KEY_VALUE}" \
             --set-env-vars "PAYPAL_ENV=${{ secrets.PAYPAL_ENV }}" \
             --set-env-vars "PAYPAL_CLIENT_ID=${{ secrets.PAYPAL_CLIENT_ID }}" \
             --set-env-vars "PAYPAL_CLIENT_SECRET=${{ secrets.PAYPAL_CLIENT_SECRET }}" \

@@ -12,12 +12,21 @@ class SourceChunk(BaseModel):
     title: str | None = None
     url: str
     text: str
+    thumbnail_url: str | None = None
+
+
+class VideoItem(BaseModel):
+    title: str
+    url: str
+    channel: str | None = None
+    summary: str
 
 
 class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceChunk] = []
     history_id: str | None = None
+    videos: list[VideoItem] = []
 
 
 class CreatePayPalOrderRequest(BaseModel):
@@ -52,6 +61,7 @@ class PublicHistoryItem(BaseModel):
     user_message: str
     bot_answer: str
     sources: list[dict] = []
+    videos: list[dict] = []
 
 
 class FeedbackRequest(BaseModel):

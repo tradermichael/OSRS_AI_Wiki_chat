@@ -87,6 +87,8 @@ function renderCitations(bubble, sources) {
   box.className = 'citations';
   box.textContent = 'Sources: ';
 
+  const thumbs = [];
+
   deduped.forEach((s, idx) => {
     const a = document.createElement('a');
     a.href = s.url;
@@ -97,9 +99,34 @@ function renderCitations(bubble, sources) {
     a.textContent = `[${idx + 1}] ${title || 'link'}`;
     box.appendChild(a);
     if (idx < deduped.length - 1) box.appendChild(document.createTextNode(' • '));
+
+    const thumbUrl = (s && s.thumbnail_url) ? String(s.thumbnail_url) : '';
+    if (thumbUrl) {
+      thumbs.push({ url: s.url, thumb: thumbUrl, title: title || 'wiki image' });
+    }
   });
 
   bubble.appendChild(box);
+
+  if (thumbs.length) {
+    const t = document.createElement('div');
+    t.className = 'citation-thumbs';
+    thumbs.slice(0, 3).forEach((it) => {
+      const link = document.createElement('a');
+      link.href = it.url;
+      link.dataset.citationUrl = String(it.url);
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = it.title;
+      img.src = it.thumb;
+      link.appendChild(img);
+      t.appendChild(link);
+    });
+    bubble.appendChild(t);
+  }
 }
 
 function setWikiPreviewVisible(visible) {

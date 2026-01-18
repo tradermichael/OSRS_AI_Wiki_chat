@@ -387,6 +387,27 @@ body {
   text-decoration: underline;
 }
 
+.citation-thumbs {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.citation-thumbs a {
+  display: inline-flex;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(54, 42, 28, 0.35);
+}
+
+.citation-thumbs img {
+  width: 96px;
+  height: 64px;
+  object-fit: cover;
+  display: block;
+}
+
 .feedback {
   margin-top: 10px;
   display: flex;

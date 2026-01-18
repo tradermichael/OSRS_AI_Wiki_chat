@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -21,6 +22,14 @@ class Settings(BaseSettings):
     # If configured, can be used as a fallback to find relevant wiki pages.
     google_cse_api_key: str | None = None
     google_cse_cx: str | None = None
+
+    # YouTube Data API v3 (optional) for quest video search.
+    youtube_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_API_KEY", "GCP_YT_API_KEY"),
+    )
+    youtube_max_results: int = 3
+    youtube_max_summaries: int = 2
 
     # Path to RAG sources configuration JSON (repo root defaults to rag_sources.json).
     rag_sources_path: str | None = None

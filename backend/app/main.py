@@ -20,6 +20,7 @@ from .rag.query_expansion import derive_search_queries, extract_keywords
 from .rag.store import RAGStore
 from .rag.store import make_chunk_id
 from .rag.wiki_preview import fetch_wiki_preview
+from .rag.google_cse import url_to_title
 from .schemas import (
     CapturePayPalOrderResponse,
     ChatRequest,
@@ -147,6 +148,7 @@ async def chat(req: ChatRequest):
                 title=(s or {}).get("title"),
                 url=(s or {}).get("url") or "",
                 text=((s or {}).get("text") or "")[:500],
+                thumbnail_url=(s or {}).get("thumbnail_url"),
             )
             for s in (cached.sources or [])
             if (s or {}).get("url")
@@ -157,8 +159,9 @@ async def chat(req: ChatRequest):
             user_message=req.message,
             bot_answer=cached.answer,
             sources=[s.model_dump() for s in sources],
+            videos=[],
         )
-        return ChatResponse(answer=cached.answer, sources=sources, history_id=str(history_id))
+        return ChatResponse(answer=cached.answer, sources=sources, history_id=str(history_id), videos=[])
 
     store = RAGStore()
     queries = derive_search_queries(req.message)
@@ -244,7 +247,23 @@ async def chat(req: ChatRequest):
                 except Exception:
                     pass
 
-    prompt = build_rag_prompt(user_message=req.message, chunks=chunks, allowed_url_prefixes=prefixes)
+    # De-dupe by URL before prompting so citation numbers match what we display.
+    prompt_chunks = []
+    prompt_seen: set[str] = set()
+    for c in chunks:
+        u = (c.url or "").strip()
+        if not u:
+            continue
+        if prefixes and not u.startswith(tuple(prefixes)):
+            continue
+        if u in prompt_seen:
+            continue
+        prompt_seen.add(u)
+        prompt_chunks.append(c)
+        if len(prompt_chunks) >= 6:
+            break
+
+    prompt = build_rag_prompt(user_message=req.message, chunks=prompt_chunks, allowed_url_prefixes=prefixes)
 
     client = GeminiVertexClient()
     try:
@@ -255,33 +274,70 @@ async def chat(req: ChatRequest):
             "Gemini (Vertex AI) is not configured yet. "
             "Set GOOGLE_CLOUD_PROJECT (and authenticate with gcloud) to enable LLM answers."
         )
-        sources = [
-            SourceChunk(title=c.title, url=c.url, text=c.text[:500])
-            for c in chunks
-            if c.url and (not prefixes or c.url.startswith(tuple(prefixes)))
-        ]
+        sources = []
+        for c in prompt_chunks[:5]:
+            if not c.url:
+                continue
+            sources.append(SourceChunk(title=c.title, url=c.url, text=c.text[:500]))
         history_id = history_store.add(
             session_id=req.session_id,
             user_message=req.message,
             bot_answer=f"{fallback}\n\nError: {exc}",
             sources=[s.model_dump() for s in sources],
+            videos=[],
         )
-        return ChatResponse(answer=f"{fallback}\n\nError: {exc}", sources=sources, history_id=str(history_id))
+        return ChatResponse(answer=f"{fallback}\n\nError: {exc}", sources=sources, history_id=str(history_id), videos=[])
 
-    # De-dupe sources by URL so the UI doesn't show repeats.
-    src_seen: set[str] = set()
+    # Attach a small thumbnail per cited URL (best-effort) so the UI can show relevant images.
+    # This is intentionally limited to a few sources to keep latency reasonable.
+    url_to_thumb: dict[str, str | None] = {}
+    try:
+        sources_cfg = load_rag_sources()
+        prefix_to_api: list[tuple[str, str]] = []
+        for s in sources_cfg:
+            for p in (s.allowed_url_prefixes or []):
+                if p and s.mediawiki_api:
+                    prefix_to_api.append((p, s.mediawiki_api))
+
+        async def _thumb_for_url(u: str) -> tuple[str, str | None]:
+            api = None
+            for p, a in prefix_to_api:
+                if u.startswith(p):
+                    api = a
+                    break
+            if not api:
+                return (u, None)
+            title = url_to_title(u)
+            if not title:
+                return (u, None)
+            try:
+                prev = await fetch_wiki_preview(mediawiki_api=api, title=title)
+                return (u, prev.thumbnail_url)
+            except Exception:
+                return (u, None)
+
+        import asyncio
+
+        tasks = [_thumb_for_url((c.url or "").strip()) for c in prompt_chunks if (c.url or "").strip()]
+        if tasks:
+            pairs = await asyncio.gather(*tasks, return_exceptions=False)
+            url_to_thumb = {u: t for (u, t) in pairs}
+    except Exception:
+        url_to_thumb = {}
+
     sources: list[SourceChunk] = []
-    for c in chunks:
+    for c in prompt_chunks[:5]:
         if not c.url:
             continue
-        if prefixes and not c.url.startswith(tuple(prefixes)):
-            continue
-        if c.url in src_seen:
-            continue
-        src_seen.add(c.url)
-        sources.append(SourceChunk(title=c.title, url=c.url, text=c.text[:500]))
-        if len(sources) >= 5:
-            break
+        u = c.url
+        sources.append(
+            SourceChunk(
+                title=c.title,
+                url=u,
+                text=c.text[:500],
+                thumbnail_url=url_to_thumb.get(u),
+            )
+        )
 
     # Store a cited copy for faster future retrieval.
     if sources:
@@ -299,9 +355,10 @@ async def chat(req: ChatRequest):
         user_message=req.message,
         bot_answer=res.text,
         sources=[s.model_dump() for s in sources],
+        videos=[],
     )
 
-    return ChatResponse(answer=res.text, sources=sources, history_id=str(history_id))
+    return ChatResponse(answer=res.text, sources=sources, history_id=str(history_id), videos=[])
 
 
 @app.get("/api/history", response_model=PublicHistoryListResponse)
@@ -315,6 +372,7 @@ def public_history(limit: int = 50, offset: int = 0):
                 user_message=i.user_message,
                 bot_answer=i.bot_answer,
                 sources=i.sources,
+                videos=getattr(i, "videos", []) or [],
             )
             for i in items
         ]
@@ -332,6 +390,7 @@ def public_history_item(item_id: str):
         user_message=rec.user_message,
         bot_answer=rec.bot_answer,
         sources=rec.sources,
+        videos=getattr(rec, "videos", []) or [],
     )
 
 
