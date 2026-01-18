@@ -3,15 +3,37 @@ const form = document.getElementById('chatForm');
 const input = document.getElementById('message');
 const historyListEl = document.getElementById('historyList');
 const refreshHistoryBtn = document.getElementById('refreshHistory');
+const toggleHistoryBtn = document.getElementById('toggleHistory');
+const appLayoutEl = document.querySelector('.app-layout');
 const viewBannerEl = document.getElementById('viewBanner');
 const viewBannerTextEl = document.getElementById('viewBannerText');
 const resumeChatBtn = document.getElementById('resumeChat');
+
+const wikiPreviewEl = document.getElementById('wikiPreview');
+const wikiPreviewTitleEl = document.getElementById('wikiPreviewTitle');
+const wikiPreviewOpenEl = document.getElementById('wikiPreviewOpen');
+const wikiPreviewCloseEl = document.getElementById('wikiPreviewClose');
+const wikiPreviewThumbEl = document.getElementById('wikiPreviewThumb');
+const wikiPreviewExtractEl = document.getElementById('wikiPreviewExtract');
 
 const BOT_NAME = 'Wise Old AI';
 const BOT_AVATAR_SRC = '/static/Wise_Old_Man_chathead.png';
 
 let liveChatSnapshot = null;
 let viewingHistoryId = null;
+
+const SESSION_ID_KEY = 'osrs_session_id';
+const LIVE_CHAT_KEY = 'osrs_live_chat_v1';
+const HISTORY_SIDEBAR_KEY = 'osrs_history_sidebar_open';
+
+function getSessionId() {
+  let sid = localStorage.getItem(SESSION_ID_KEY);
+  if (!sid) {
+    sid = (crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2);
+    localStorage.setItem(SESSION_ID_KEY, sid);
+  }
+  return sid;
+}
 
 function createRow(kind) {
   const row = document.createElement('div');
@@ -46,6 +68,202 @@ function addMessage(kind, roleLabel, text) {
   return bubble;
 }
 
+function renderCitations(bubble, sources) {
+  if (!sources || !sources.length) return;
+
+  // De-dupe by URL (history entries may contain older duplicates).
+  const seen = new Set();
+  const deduped = [];
+  for (const s of sources) {
+    const url = (s && s.url) ? String(s.url) : '';
+    if (!url) continue;
+    if (seen.has(url)) continue;
+    seen.add(url);
+    deduped.push(s);
+    if (deduped.length >= 6) break;
+  }
+
+  const box = document.createElement('div');
+  box.className = 'citations';
+  box.textContent = 'Sources: ';
+
+  deduped.forEach((s, idx) => {
+    const a = document.createElement('a');
+    a.href = s.url;
+    a.dataset.citationUrl = String(s.url);
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    const title = (s.title || s.url || '').trim();
+    a.textContent = `[${idx + 1}] ${title || 'link'}`;
+    box.appendChild(a);
+    if (idx < deduped.length - 1) box.appendChild(document.createTextNode(' • '));
+  });
+
+  bubble.appendChild(box);
+}
+
+function setWikiPreviewVisible(visible) {
+  if (!wikiPreviewEl) return;
+  wikiPreviewEl.hidden = !visible;
+}
+
+function setWikiPreviewLoading(url) {
+  if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Loading…';
+  if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = url || '#';
+  if (wikiPreviewExtractEl) wikiPreviewExtractEl.textContent = 'Fetching preview from the wiki…';
+  if (wikiPreviewThumbEl) {
+    wikiPreviewThumbEl.hidden = true;
+    wikiPreviewThumbEl.src = '';
+  }
+}
+
+async function openWikiPreview(url) {
+  const u = String(url || '').trim();
+  if (!u) return;
+
+  setWikiPreviewVisible(true);
+  setWikiPreviewLoading(u);
+
+  try {
+    const r = await fetch(`/api/wiki/preview?url=${encodeURIComponent(u)}`);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+
+    if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = data.title || 'Wiki Preview';
+    if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = data.url || u;
+    if (wikiPreviewExtractEl) wikiPreviewExtractEl.textContent = data.extract || '(No preview text available.)';
+
+    const thumb = data.thumbnail_url;
+    if (wikiPreviewThumbEl) {
+      if (thumb) {
+        wikiPreviewThumbEl.src = thumb;
+        wikiPreviewThumbEl.hidden = false;
+      } else {
+        wikiPreviewThumbEl.hidden = true;
+        wikiPreviewThumbEl.src = '';
+      }
+    }
+  } catch {
+    // If preview fails, fall back to opening the source.
+    if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Preview unavailable';
+    if (wikiPreviewExtractEl) wikiPreviewExtractEl.textContent = 'Could not fetch a preview. Use “Open in new tab”.';
+    if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = u;
+  }
+}
+
+async function sendFeedback({ historyId, rating }) {
+  const r = await fetch('/api/feedback', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ history_id: String(historyId), rating: Number(rating), session_id: getSessionId() })
+  });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${r.status}`);
+  }
+  return await r.json();
+}
+
+function attachFeedbackControls(bubble, historyId) {
+  if (!historyId) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'feedback';
+
+  const up = document.createElement('button');
+  up.type = 'button';
+  up.textContent = 'Helpful';
+
+  const down = document.createElement('button');
+  down.type = 'button';
+  down.textContent = 'Not helpful';
+
+  const status = document.createElement('span');
+  status.className = 'status';
+  status.textContent = '';
+
+  const onClick = async (rating) => {
+    try {
+      up.disabled = true;
+      down.disabled = true;
+      status.textContent = 'Thanks — saved.';
+      const data = await sendFeedback({ historyId, rating });
+      if (data && data.summary) {
+        status.textContent = `Saved. Up ${data.summary.thumbs_up || 0} / Down ${data.summary.thumbs_down || 0}`;
+      }
+    } catch {
+      status.textContent = 'Could not save feedback.';
+      up.disabled = false;
+      down.disabled = false;
+    }
+  };
+
+  up.addEventListener('click', () => onClick(1));
+  down.addEventListener('click', () => onClick(-1));
+
+  wrap.appendChild(up);
+  wrap.appendChild(down);
+  wrap.appendChild(status);
+  bubble.appendChild(wrap);
+}
+
+function addBotAnswer(answerText, sources, historyId) {
+  const { row, bubble } = createRow('bot');
+  bubble.querySelector('.role').textContent = BOT_NAME;
+  bubble.querySelector('.text').textContent = answerText;
+  renderCitations(bubble, sources);
+  attachFeedbackControls(bubble, historyId);
+  messagesEl.appendChild(row);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function saveLiveChat() {
+  try {
+    const rows = Array.from(messagesEl.querySelectorAll('.msg-row'));
+    const items = rows.slice(-50).map((r) => {
+      const me = r.classList.contains('me');
+      const bubble = r.querySelector('.msg');
+      const role = bubble?.querySelector('.role')?.textContent || '';
+      const text = bubble?.querySelector('.text')?.textContent || '';
+      const cites = Array.from(bubble?.querySelectorAll('.citations a') || []).map((a) => ({
+        title: a.textContent,
+        url: a.getAttribute('href') || ''
+      }));
+      return { kind: me ? 'me' : 'bot', role, text, sources: cites };
+    });
+    localStorage.setItem(LIVE_CHAT_KEY, JSON.stringify(items));
+  } catch {
+    // ignore
+  }
+}
+
+function loadLiveChat() {
+  try {
+    const raw = localStorage.getItem(LIVE_CHAT_KEY);
+    if (!raw) return false;
+    const items = JSON.parse(raw);
+    if (!Array.isArray(items) || !items.length) return false;
+
+    messagesEl.innerHTML = '';
+    for (const it of items) {
+      if (it.kind === 'me') {
+        addMessage('me', 'You', it.text || '');
+      } else {
+        // Stored citations may have "[1] Title" in title; keep as-is.
+        const sources = (it.sources || []).map((s) => ({ title: s.title || '', url: s.url || '' }));
+        addBotAnswer(it.text || '', sources, null);
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function setComposerEnabled(enabled) {
   input.disabled = !enabled;
   const btn = form.querySelector('button[type="submit"]') || form.querySelector('button');
@@ -70,14 +288,7 @@ function enterHistoryView(item) {
   setComposerEnabled(false);
 
   addMessage('me', 'You', item.user_message);
-  addMessage('bot', BOT_NAME, item.bot_answer || '(no answer)');
-
-  if (item.sources && item.sources.length) {
-    const srcText = item.sources
-      .map((s, i) => `Source ${i + 1}: ${s.title || ''} ${s.url || ''}`.trim())
-      .join('\n');
-    addMessage('bot', 'Sources', srcText);
-  }
+  addBotAnswer(item.bot_answer || '(no answer)', item.sources || [], item.id);
 }
 
 function exitHistoryView() {
@@ -171,6 +382,11 @@ function addTyping() {
 
 addMessage('bot', BOT_NAME, 'Ask me anything about OSRS.');
 
+// Restore live chat if available
+if (messagesEl && loadLiveChat()) {
+  // already restored
+}
+
 if (refreshHistoryBtn) {
   refreshHistoryBtn.addEventListener('click', () => {
     loadHistory();
@@ -183,10 +399,44 @@ if (resumeChatBtn) {
   });
 }
 
+if (wikiPreviewCloseEl) {
+  wikiPreviewCloseEl.addEventListener('click', () => {
+    setWikiPreviewVisible(false);
+  });
+}
+
+// Click citations to open an inline preview (normal click).
+// Use Ctrl/Shift/Alt/Meta click to open the link normally.
+if (messagesEl) {
+  messagesEl.addEventListener('click', (e) => {
+    const a = e.target && e.target.closest ? e.target.closest('.citations a') : null;
+    if (!a) return;
+
+    const url = a.dataset ? a.dataset.citationUrl : null;
+    if (!url) return;
+
+    if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+    e.preventDefault();
+    openWikiPreview(url);
+  });
+}
+
 // Load initial history once the page is ready.
 document.addEventListener('DOMContentLoaded', () => {
+  // Sidebar toggle state
+  const open = localStorage.getItem(HISTORY_SIDEBAR_KEY);
+  if (appLayoutEl && open === '0') {
+    appLayoutEl.classList.add('sidebar-collapsed');
+  }
   loadHistory();
 });
+
+if (toggleHistoryBtn && appLayoutEl) {
+  toggleHistoryBtn.addEventListener('click', () => {
+    const collapsed = appLayoutEl.classList.toggle('sidebar-collapsed');
+    localStorage.setItem(HISTORY_SIDEBAR_KEY, collapsed ? '0' : '1');
+  });
+}
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -206,7 +456,7 @@ form.addEventListener('submit', async (e) => {
     const r = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg })
+      body: JSON.stringify({ message: msg, session_id: getSessionId() })
     });
 
     if (!r.ok) {
@@ -215,12 +465,21 @@ form.addEventListener('submit', async (e) => {
     }
 
     const data = await r.json();
-    typingBubble.querySelector('.text').textContent = data.answer || '(no answer)';
+
+    // Replace typing bubble contents with the real answer + citations + feedback.
+    const answerText = data.answer || '(no answer)';
+    const historyId = data.history_id || null;
+    typingBubble.querySelector('.text').textContent = answerText;
+    typingBubble.dataset.historyId = historyId ? String(historyId) : '';
 
     if (data.sources && data.sources.length) {
-      const srcText = data.sources.map((s, i) => `Source ${i+1}: ${s.title || ''} ${s.url}`).join('\n');
-      addMessage('bot', 'Sources', srcText);
+      renderCitations(typingBubble, data.sources);
     }
+    if (historyId) {
+      attachFeedbackControls(typingBubble, historyId);
+    }
+
+    saveLiveChat();
   } catch (err) {
     typingBubble.querySelector('.text').textContent = err.message || String(err);
     typingBubble.querySelector('.role').textContent = 'Error';

@@ -11,7 +11,7 @@ from ..core.config import settings
 
 @dataclass(frozen=True)
 class PublicChatRecord:
-    id: int
+    id: str
     created_at: str
     session_id: str | None
     user_message: str
@@ -62,7 +62,7 @@ class PublicChatStore:
         user_message: str,
         bot_answer: str,
         sources: list[dict],
-    ) -> int:
+    ) -> str:
         created_at = datetime.now(timezone.utc).isoformat()
         sources_json = json.dumps(sources or [], ensure_ascii=False)
 
@@ -76,7 +76,10 @@ class PublicChatStore:
                 (created_at, session_id, user_message, bot_answer, sources_json),
             )
             conn.commit()
-            return int(cur.lastrowid)
+            lastrowid = cur.lastrowid
+            if lastrowid is None:
+                raise RuntimeError("sqlite did not return lastrowid")
+            return str(int(lastrowid))
 
     def list(self, *, limit: int = 50, offset: int = 0) -> list[PublicChatRecord]:
         limit = max(1, min(int(limit), 200))
@@ -101,7 +104,7 @@ class PublicChatStore:
                 sources = []
             out.append(
                 PublicChatRecord(
-                    id=int(r["id"]),
+                    id=str(int(r["id"])),
                     created_at=str(r["created_at"]),
                     session_id=r["session_id"],
                     user_message=str(r["user_message"]),
@@ -111,8 +114,8 @@ class PublicChatStore:
             )
         return out
 
-    def get(self, record_id: int) -> PublicChatRecord | None:
-        rid = int(record_id)
+    def get(self, record_id: str) -> PublicChatRecord | None:
+        rid = int(str(record_id))
         with self._connect() as conn:
             r = conn.execute(
                 """
@@ -132,10 +135,18 @@ class PublicChatStore:
             sources = []
 
         return PublicChatRecord(
-            id=int(r["id"]),
+            id=str(int(r["id"])),
             created_at=str(r["created_at"]),
             session_id=r["session_id"],
             user_message=str(r["user_message"]),
             bot_answer=str(r["bot_answer"]),
             sources=list(sources) if isinstance(sources, list) else [],
         )
+
+
+def get_public_chat_store():
+    if (settings.history_backend or "sqlite").lower() == "firestore":
+        from .firestore_store import FirestorePublicChatStore
+
+        return FirestorePublicChatStore()
+    return PublicChatStore()

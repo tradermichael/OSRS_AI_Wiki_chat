@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     rag_db_path: str = "./data/rag.sqlite"
     rag_top_k: int = 5
 
+    # Google Programmable Search Engine (Custom Search JSON API) for live searches.
+    # If configured, can be used as a fallback to find relevant wiki pages.
+    google_cse_api_key: str | None = None
+    google_cse_cx: str | None = None
+
     # Path to RAG sources configuration JSON (repo root defaults to rag_sources.json).
     rag_sources_path: str | None = None
 
@@ -25,6 +30,12 @@ class Settings(BaseSettings):
 
     # Public chat history log storage. Defaults to RAG_DB_PATH if not set.
     history_db_path: str | None = None
+
+    # Public history persistence backend.
+    # sqlite: local file (ephemeral on Cloud Run)
+    # firestore: persistent in GCP Firestore
+    history_backend: str = "sqlite"  # sqlite|firestore
+    firestore_collection: str = "public_chat"
 
     paypal_env: str = "sandbox"  # sandbox|live
     paypal_client_id: str | None = None

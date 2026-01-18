@@ -16,22 +16,12 @@
           <span class="gold-coin" aria-hidden="true"></span>
           <span><span id="goldTotal">0</span> gp donated</span>
         </span>
+        <button id="toggleHistory" type="button" class="sidebar-btn">Public log</button>
         <a href="/donate">Donate</a>
       </nav>
     </header>
 
     <div class="app-layout">
-      <aside class="sidebar">
-        <div class="sidebar-head">
-          <div class="sidebar-title">Public Chat Log</div>
-          <button id="refreshHistory" type="button" class="sidebar-btn">Refresh</button>
-        </div>
-        <div class="sidebar-note">
-          Notice: all interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
-        </div>
-        <div id="historyList" class="history"></div>
-      </aside>
-
       <main class="chat">
         <div class="public-notice">
           All interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
@@ -40,6 +30,21 @@
           <span id="viewBannerText"></span>
           <button id="resumeChat" type="button">Resume live chat</button>
         </div>
+
+        <div id="wikiPreview" class="wiki-preview" hidden>
+          <div class="wiki-preview__head">
+            <div>
+              <div id="wikiPreviewTitle" class="wiki-preview__title">Wiki Preview</div>
+              <a id="wikiPreviewOpen" class="wiki-preview__open" href="#" target="_blank" rel="noopener noreferrer">Open in new tab</a>
+            </div>
+            <button id="wikiPreviewClose" type="button" class="wiki-preview__close">Close</button>
+          </div>
+          <div class="wiki-preview__body">
+            <img id="wikiPreviewThumb" class="wiki-preview__thumb" alt="" hidden />
+            <div id="wikiPreviewExtract" class="wiki-preview__extract"></div>
+          </div>
+        </div>
+
         <div id="messages" class="messages"></div>
         <form id="chatForm" class="composer">
           <input id="message" placeholder="Ask something about OSRS..." autocomplete="off" />
@@ -49,6 +54,17 @@
           Sources are cited from configured OSRS wiki sites.
         </div>
       </main>
+
+      <aside class="sidebar" id="historySidebar">
+        <div class="sidebar-head">
+          <div class="sidebar-title">Public Chat Log</div>
+          <button id="refreshHistory" type="button" class="sidebar-btn">Refresh</button>
+        </div>
+        <div class="sidebar-note">
+          Notice: all interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
+        </div>
+        <div id="historyList" class="history"></div>
+      </aside>
     </div>
   </div>
 

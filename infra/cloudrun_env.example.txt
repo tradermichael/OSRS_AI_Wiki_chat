@@ -10,6 +10,14 @@ GCP_RUNTIME_SERVICE_ACCOUNT_EMAIL=osrs-ai-wiki-chat-runtime@YOUR_PROJECT.iam.gse
 
 GEMINI_MODEL=gemini-2.5-flash
 
+# Google Programmable Search Engine (Custom Search JSON API)
+GOOGLE_CSE_API_KEY=
+GOOGLE_CSE_CX=
+
+# Public chat history persistence
+HISTORY_BACKEND=firestore
+FIRESTORE_COLLECTION=public_chat
+
 PAYPAL_ENV=sandbox
 PAYPAL_CLIENT_ID=
 PAYPAL_CLIENT_SECRET=

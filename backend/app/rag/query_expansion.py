@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import re
+
+
+_WORD_RE = re.compile(r"[a-zA-Z0-9_']+")
+
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "can",
+    "do",
+    "does",
+    "for",
+    "from",
+    "get",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "know",
+    "me",
+    "of",
+    "on",
+    "or",
+    "tell",
+    "that",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+    "you",
+    "your",
+}
+
+
+def _tokens(text: str) -> list[str]:
+    return [m.group(0) for m in _WORD_RE.finditer(text or "")]
+
+
+def _keywords(text: str) -> list[str]:
+    toks = [t.lower() for t in _tokens(text)]
+    toks = [t for t in toks if t and t not in _STOPWORDS]
+    # de-dupe while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in toks:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def extract_keywords(user_message: str, *, max_terms: int = 8) -> list[str]:
+    """Extract a compact list of keywords from a user message."""
+    keys = _keywords(user_message)
+    return keys[:max_terms]
+
+
+def derive_search_queries(user_message: str) -> list[str]:
+    """Derive better search queries from a conversational question.
+
+    This is intentionally heuristic (no extra LLM call):
+    - Try to extract the topic after "about".
+    - Try a compact keyword query.
+    - Try an OSRS-qualified query.
+    """
+
+    msg = (user_message or "").strip()
+    if not msg:
+        return []
+
+    queries: list[str] = []
+
+    m = re.search(r"\babout\s+(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        topic = m.group(1).strip().strip("?!.\"")
+        if topic:
+            queries.append(topic)
+            queries.append(f"{topic} osrs")
+
+    keys = _keywords(msg)
+    if keys:
+        key_q = " ".join(keys[:8])
+        queries.append(key_q)
+        queries.append(f"{key_q} osrs")
+
+    # Always include the raw message last.
+    queries.append(msg)
+
+    # De-dupe while preserving order
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in queries:
+        qn = re.sub(r"\s+", " ", q).strip()
+        if not qn:
+            continue
+        if qn.lower() in seen:
+            continue
+        seen.add(qn.lower())
+        out.append(qn)
+
+    return out[:4]

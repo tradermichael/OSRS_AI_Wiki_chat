@@ -20,9 +20,48 @@ class RetrievedChunk:
 
 _WORD_RE = re.compile(r"[a-zA-Z0-9_']+")
 
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "can",
+    "do",
+    "does",
+    "for",
+    "from",
+    "get",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "know",
+    "me",
+    "of",
+    "on",
+    "or",
+    "tell",
+    "that",
+    "the",
+    "to",
+    "what",
+    "when",
+    "where",
+    "who",
+    "why",
+    "with",
+    "you",
+    "your",
+}
+
 
 def _tokenize(text: str) -> list[str]:
-    return [m.group(0).lower() for m in _WORD_RE.finditer(text)]
+    toks = [m.group(0).lower() for m in _WORD_RE.finditer(text or "")]
+    return [t for t in toks if t and t not in _STOPWORDS]
 
 
 class RAGStore:

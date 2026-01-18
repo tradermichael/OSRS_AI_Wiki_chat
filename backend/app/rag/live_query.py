@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 
 from ..core.rag_sources import load_rag_sources
+from ..core.config import settings
 from .ingest_mediawiki import chunk_page, search_and_fetch
+from .ingest_mediawiki import mediawiki_fetch_plaintext
+from .google_cse import google_cse_search, url_to_title
 from .store import RetrievedChunk
 
 
@@ -55,3 +58,78 @@ async def live_query_chunks(
             break
 
     return merged[:max_chunks_total]
+
+
+async def live_search_web_and_fetch_chunks(
+    query: str,
+    *,
+    max_results: int = 5,
+    max_chunks_total: int = 8,
+    allowed_url_prefixes: list[str] | None = None,
+) -> list[RetrievedChunk]:
+    """Live search via Google PSE, then fetch plaintext from matched wiki pages.
+
+    This keeps citations on the allowed wiki sites (your PSE config should also restrict sites).
+    """
+
+    api_key = settings.google_cse_api_key
+    cx = settings.google_cse_cx
+    if not api_key or not cx:
+        return []
+
+    prefixes = tuple(p for p in (allowed_url_prefixes or []) if p)
+    sources = load_rag_sources()
+
+    # Map allowed prefixes -> MediaWiki API
+    prefix_to_api: list[tuple[str, str]] = []
+    for s in sources:
+        for p in (s.allowed_url_prefixes or []):
+            prefix_to_api.append((p, s.mediawiki_api))
+
+    results = await google_cse_search(api_key=api_key, cx=cx, query=query, num=max_results)
+    urls = [r.url for r in results if r.url]
+    if prefixes:
+        urls = [u for u in urls if u.startswith(prefixes)]
+    if not urls:
+        return []
+
+    out: list[RetrievedChunk] = []
+    seen_url: set[str] = set()
+
+    for url in urls:
+        if url in seen_url:
+            continue
+        seen_url.add(url)
+
+        title = url_to_title(url)
+        if not title:
+            continue
+
+        api = None
+        for p, a in prefix_to_api:
+            if p and url.startswith(p):
+                api = a
+                break
+        if not api:
+            continue
+
+        try:
+            page = await mediawiki_fetch_plaintext(api, title)
+        except Exception:
+            continue
+
+        if prefixes and page.url and not page.url.startswith(prefixes):
+            continue
+
+        for text, meta in chunk_page(page):
+            out.append(
+                RetrievedChunk(
+                    text=text,
+                    url=str((meta or {}).get("url") or ""),
+                    title=(meta or {}).get("title"),
+                )
+            )
+            if len(out) >= max_chunks_total:
+                return out[:max_chunks_total]
+
+    return out[:max_chunks_total]

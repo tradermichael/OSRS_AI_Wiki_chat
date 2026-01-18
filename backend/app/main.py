@@ -7,16 +7,19 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .core.config import settings
-from .core.rag_sources import allowed_url_prefixes
+from .core.rag_sources import allowed_url_prefixes, load_rag_sources
 from .gold.store import GoldStore
-from .history.store import PublicChatStore
+from .feedback.store import get_feedback_store
+from .history.store import get_public_chat_store
 from .llm.gemini_vertex import GeminiVertexClient
 from .payments.paypal import PayPalClient
 from .rag.answer_cache import AnswerCacheStore
-from .rag.live_query import live_query_chunks
+from .rag.live_query import live_query_chunks, live_search_web_and_fetch_chunks
 from .rag.prompting import build_rag_prompt
+from .rag.query_expansion import derive_search_queries, extract_keywords
 from .rag.store import RAGStore
 from .rag.store import make_chunk_id
+from .rag.wiki_preview import fetch_wiki_preview
 from .schemas import (
     CapturePayPalOrderResponse,
     ChatRequest,
@@ -25,6 +28,9 @@ from .schemas import (
     CreatePayPalOrderResponse,
     GoldDonateRequest,
     GoldTotalResponse,
+    FeedbackRequest,
+    FeedbackResponse,
+    WikiPreviewResponse,
     PublicHistoryItem,
     PublicHistoryListResponse,
     SourceChunk,
@@ -66,6 +72,46 @@ def health():
     return {"ok": True, "env": settings.app_env}
 
 
+@app.get("/api/wiki/preview", response_model=WikiPreviewResponse)
+async def wiki_preview(url: str):
+    prefixes = allowed_url_prefixes()
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    if prefixes and not url.startswith(tuple(prefixes)):
+        raise HTTPException(status_code=400, detail="url not allowed")
+
+    # Find the matching source config so we know which MediaWiki API to use.
+    matched_api = None
+    for s in load_rag_sources():
+        for p in (s.allowed_url_prefixes or []):
+            if p and url.startswith(p):
+                matched_api = s.mediawiki_api
+                break
+        if matched_api:
+            break
+
+    if not matched_api:
+        raise HTTPException(status_code=400, detail="No matching source config for url")
+
+    # Convert url -> title
+    from .rag.google_cse import url_to_title
+
+    title = url_to_title(url)
+    if not title:
+        raise HTTPException(status_code=400, detail="Could not derive page title")
+
+    prev = await fetch_wiki_preview(mediawiki_api=matched_api, title=title)
+    # Ensure the returned fullurl still matches allowlist
+    if prefixes and prev.url and not prev.url.startswith(tuple(prefixes)):
+        raise HTTPException(status_code=400, detail="preview url not allowed")
+    return WikiPreviewResponse(
+        title=prev.title,
+        url=prev.url or url,
+        extract=prev.extract,
+        thumbnail_url=prev.thumbnail_url,
+    )
+
+
 @app.get("/api/gold/total", response_model=GoldTotalResponse)
 def gold_total():
     store = GoldStore()
@@ -85,9 +131,16 @@ def gold_donate(req: GoldDonateRequest):
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
     prefixes = allowed_url_prefixes()
+    history_store = get_public_chat_store()
+
+    # If the user asks for "latest"/"current" info, skip the answer cache.
+    msg_l = (req.message or "").lower()
+    force_fresh = any(w in msg_l for w in ("latest", "today", "current", "new", "update"))
 
     # Fast path: reuse a previously-generated, cited answer for similar questions.
-    cached = AnswerCacheStore().find_similar(question=req.message, allowed_url_prefixes=prefixes)
+    cached = None if force_fresh else AnswerCacheStore().find_similar(
+        question=req.message, allowed_url_prefixes=prefixes
+    )
     if cached:
         sources = [
             SourceChunk(
@@ -99,23 +152,52 @@ async def chat(req: ChatRequest):
             if (s or {}).get("url")
         ]
 
-        PublicChatStore().add(
+        history_id = history_store.add(
             session_id=req.session_id,
             user_message=req.message,
             bot_answer=cached.answer,
             sources=[s.model_dump() for s in sources],
         )
-        return ChatResponse(answer=cached.answer, sources=sources)
+        return ChatResponse(answer=cached.answer, sources=sources, history_id=str(history_id))
 
     store = RAGStore()
-    chunks = store.query(text=req.message, top_k=5, allowed_url_prefixes=prefixes)
+    queries = derive_search_queries(req.message)
+
+    # Merge top chunks across a few derived queries.
+    chunks = []
+    seen_chunk_keys: set[tuple[str, str]] = set()
+    for q in queries or [req.message]:
+        for c in store.query(text=q, top_k=5, allowed_url_prefixes=prefixes):
+            key = (c.url or "", (c.text or "")[:80])
+            if key in seen_chunk_keys:
+                continue
+            seen_chunk_keys.add(key)
+            chunks.append(c)
+        if len(chunks) >= 8:
+            break
+    chunks = chunks[:8]
+
+    # If we got chunks but they don't mention the core topic terms, treat as weak.
+    key_terms = extract_keywords(req.message)
+    key_terms = [t for t in key_terms if len(t) >= 4]
+    weak_local = False
+    if chunks and key_terms:
+        hay = "\n".join(((c.title or "") + "\n" + (c.text or "")) for c in chunks).lower()
+        hits = sum(1 for t in key_terms if t in hay)
+        # Require at least one meaningful term to appear in the retrieved context.
+        weak_local = hits == 0
 
     # If the local SQLite/BM25 store has nothing (common on fresh deploys),
     # live-query the configured wiki sources and cache the chunks.
-    if not chunks:
-        live_chunks = await live_query_chunks(req.message, allowed_url_prefixes=prefixes)
+    if not chunks or weak_local or force_fresh:
+        live_chunks: list = []
+        # Prefer the most focused query (first derived query).
+        primary_q = (queries[0] if queries else req.message)
+        live_chunks.extend(await live_query_chunks(primary_q, allowed_url_prefixes=prefixes))
+        live_chunks = live_chunks[:8]
         if live_chunks:
-            chunks = live_chunks
+            # Merge live chunks in; prefer live if local was weak.
+            chunks = live_chunks if (not chunks or weak_local or force_fresh) else (chunks + live_chunks)
             try:
                 texts: list[str] = []
                 metadatas: list[dict] = []
@@ -131,6 +213,36 @@ async def chat(req: ChatRequest):
             except Exception:
                 # Cache is best-effort; don't break chat if it fails.
                 pass
+
+        # If MediaWiki search still didn't produce relevant context, fall back to Google PSE.
+        if not chunks:
+            try:
+                web_chunks = await live_search_web_and_fetch_chunks(
+                    primary_q,
+                    allowed_url_prefixes=prefixes,
+                    max_results=5,
+                    max_chunks_total=8,
+                )
+            except Exception:
+                web_chunks = []
+
+            if web_chunks:
+                chunks = web_chunks
+                # best-effort cache
+                try:
+                    texts: list[str] = []
+                    metadatas: list[dict] = []
+                    ids: list[str] = []
+                    for i, c in enumerate(web_chunks):
+                        if not c.url:
+                            continue
+                        texts.append(c.text)
+                        metadatas.append({"url": c.url, "title": c.title})
+                        ids.append(make_chunk_id(c.url, i))
+                    if texts:
+                        store.add_documents(texts=texts, metadatas=metadatas, ids=ids)
+                except Exception:
+                    pass
 
     prompt = build_rag_prompt(user_message=req.message, chunks=chunks, allowed_url_prefixes=prefixes)
 
@@ -148,19 +260,28 @@ async def chat(req: ChatRequest):
             for c in chunks
             if c.url and (not prefixes or c.url.startswith(tuple(prefixes)))
         ]
-        PublicChatStore().add(
+        history_id = history_store.add(
             session_id=req.session_id,
             user_message=req.message,
             bot_answer=f"{fallback}\n\nError: {exc}",
             sources=[s.model_dump() for s in sources],
         )
-        return ChatResponse(answer=f"{fallback}\n\nError: {exc}", sources=sources)
+        return ChatResponse(answer=f"{fallback}\n\nError: {exc}", sources=sources, history_id=str(history_id))
 
-    sources = [
-        SourceChunk(title=c.title, url=c.url, text=c.text[:500])
-        for c in chunks
-        if c.url and (not prefixes or c.url.startswith(tuple(prefixes)))
-    ]
+    # De-dupe sources by URL so the UI doesn't show repeats.
+    src_seen: set[str] = set()
+    sources: list[SourceChunk] = []
+    for c in chunks:
+        if not c.url:
+            continue
+        if prefixes and not c.url.startswith(tuple(prefixes)):
+            continue
+        if c.url in src_seen:
+            continue
+        src_seen.add(c.url)
+        sources.append(SourceChunk(title=c.title, url=c.url, text=c.text[:500]))
+        if len(sources) >= 5:
+            break
 
     # Store a cited copy for faster future retrieval.
     if sources:
@@ -173,19 +294,19 @@ async def chat(req: ChatRequest):
         except Exception:
             pass
 
-    PublicChatStore().add(
+    history_id = history_store.add(
         session_id=req.session_id,
         user_message=req.message,
         bot_answer=res.text,
         sources=[s.model_dump() for s in sources],
     )
 
-    return ChatResponse(answer=res.text, sources=sources)
+    return ChatResponse(answer=res.text, sources=sources, history_id=str(history_id))
 
 
 @app.get("/api/history", response_model=PublicHistoryListResponse)
 def public_history(limit: int = 50, offset: int = 0):
-    items = PublicChatStore().list(limit=limit, offset=offset)
+    items = get_public_chat_store().list(limit=limit, offset=offset)
     return PublicHistoryListResponse(
         items=[
             PublicHistoryItem(
@@ -201,8 +322,8 @@ def public_history(limit: int = 50, offset: int = 0):
 
 
 @app.get("/api/history/{item_id}", response_model=PublicHistoryItem)
-def public_history_item(item_id: int):
-    rec = PublicChatStore().get(item_id)
+def public_history_item(item_id: str):
+    rec = get_public_chat_store().get(item_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Not found")
     return PublicHistoryItem(
@@ -212,6 +333,17 @@ def public_history_item(item_id: int):
         bot_answer=rec.bot_answer,
         sources=rec.sources,
     )
+
+
+@app.post("/api/feedback", response_model=FeedbackResponse)
+def feedback(req: FeedbackRequest):
+    store = get_feedback_store()
+    try:
+        fid = store.add(history_id=req.history_id, rating=req.rating, session_id=req.session_id)
+        summary = store.summary(history_id=req.history_id)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return FeedbackResponse(ok=True, feedback_id=fid, summary=summary)
 
 
 @app.post("/api/paypal/create-order", response_model=CreatePayPalOrderResponse)

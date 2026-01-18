@@ -17,6 +17,7 @@ class SourceChunk(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceChunk] = []
+    history_id: str | None = None
 
 
 class CreatePayPalOrderRequest(BaseModel):
@@ -46,11 +47,30 @@ class GoldTotalResponse(BaseModel):
 
 
 class PublicHistoryItem(BaseModel):
-    id: int
+    id: str
     created_at: str
     user_message: str
     bot_answer: str
     sources: list[dict] = []
+
+
+class FeedbackRequest(BaseModel):
+    history_id: str = Field(min_length=1, max_length=128)
+    rating: int = Field(..., description="1 for thumbs up, -1 for thumbs down")
+    session_id: str | None = Field(default=None, max_length=128)
+
+
+class FeedbackResponse(BaseModel):
+    ok: bool = True
+    feedback_id: str
+    summary: dict = {}
+
+
+class WikiPreviewResponse(BaseModel):
+    title: str
+    url: str
+    extract: str
+    thumbnail_url: str | None = None
 
 
 class PublicHistoryListResponse(BaseModel):
