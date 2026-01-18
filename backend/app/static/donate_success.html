@@ -7,10 +7,17 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <canvas id="bg" aria-hidden="true"></canvas>
   <div class="container">
     <header class="header">
       <h1>Thank you!</h1>
-      <nav><a href="/">Back to chat</a></nav>
+      <nav>
+        <span class="gold-pill" title="Total gold donated">
+          <span class="gold-coin" aria-hidden="true"></span>
+          <span><span id="goldTotal">0</span> gp donated</span>
+        </span>
+        <a href="/">Back to chat</a>
+      </nav>
     </header>
 
     <main class="card">
@@ -20,6 +27,8 @@
     </main>
   </div>
 
+  <script src="/static/background.js"></script>
+  <script src="/static/site.js"></script>
   <script src="/static/donate_success.js"></script>
 </body>
 </html>

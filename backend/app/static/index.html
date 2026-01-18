@@ -7,10 +7,15 @@
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
+  <canvas id="bg" aria-hidden="true"></canvas>
   <div class="container">
     <header class="header">
       <h1>OSRS AI Wiki Chat</h1>
       <nav>
+        <span class="gold-pill" title="Total gold donated">
+          <span class="gold-coin" aria-hidden="true"></span>
+          <span><span id="goldTotal">0</span> gp donated</span>
+        </span>
         <a href="/donate">Donate</a>
       </nav>
     </header>
@@ -27,6 +32,8 @@
     </main>
   </div>
 
+  <script src="/static/background.js"></script>
+  <script src="/static/site.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

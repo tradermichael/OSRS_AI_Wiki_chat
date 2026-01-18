@@ -12,10 +12,13 @@ class Settings(BaseSettings):
 
     google_cloud_project: str | None = None
     vertex_location: str = "us-central1"
-    gemini_model: str = "gemini-1.5-flash-002"
+    gemini_model: str = "gemini-2.5-flash"
 
     rag_db_path: str = "./data/rag.sqlite"
     rag_top_k: int = 5
+
+    # Fake "gold" donation counter. Defaults to RAG_DB_PATH if not set.
+    gold_db_path: str | None = None
 
     paypal_env: str = "sandbox"  # sandbox|live
     paypal_client_id: str | None = None

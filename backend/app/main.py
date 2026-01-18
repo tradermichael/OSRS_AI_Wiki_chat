@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .core.config import settings
+from .gold.store import GoldStore
 from .llm.gemini_vertex import GeminiVertexClient
 from .payments.paypal import PayPalClient
 from .rag.prompting import build_rag_prompt
@@ -17,6 +18,8 @@ from .schemas import (
     ChatResponse,
     CreatePayPalOrderRequest,
     CreatePayPalOrderResponse,
+    GoldDonateRequest,
+    GoldTotalResponse,
     SourceChunk,
 )
 
@@ -54,6 +57,22 @@ def robots():
 @app.get("/api/health")
 def health():
     return {"ok": True, "env": settings.app_env}
+
+
+@app.get("/api/gold/total", response_model=GoldTotalResponse)
+def gold_total():
+    store = GoldStore()
+    return GoldTotalResponse(total_gold=store.get_total())
+
+
+@app.post("/api/gold/donate", response_model=GoldTotalResponse)
+def gold_donate(req: GoldDonateRequest):
+    store = GoldStore()
+    try:
+        total = store.add(req.amount_gold)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return GoldTotalResponse(total_gold=total)
 
 
 @app.post("/api/chat", response_model=ChatResponse)

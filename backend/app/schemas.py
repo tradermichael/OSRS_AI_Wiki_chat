@@ -35,3 +35,11 @@ class CapturePayPalOrderResponse(BaseModel):
     order_id: str
     status: str
     payer_email: str | None = None
+
+
+class GoldDonateRequest(BaseModel):
+    amount_gold: int = Field(..., ge=1, le=2_147_483_647)
+
+
+class GoldTotalResponse(BaseModel):
+    total_gold: int
