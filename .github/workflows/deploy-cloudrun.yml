@@ -34,10 +34,12 @@ jobs:
 
       - name: Build and push image
         run: |
-          PROJECT_ID="${{ secrets.GCP_PROJECT_ID }}"
-          REGION="${{ secrets.GCP_REGION }}"
-          REPO="${{ secrets.GCP_ARTIFACT_REPO }}"
-          IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/$REPO/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          # Guard against accidental trailing newlines in GitHub Secrets
+          PROJECT_ID="$(printf '%s' "${{ secrets.GCP_PROJECT_ID }}" | tr -d '\r\n')"
+          REGION="$(printf '%s' "${{ secrets.GCP_REGION }}" | tr -d '\r\n')"
+          REPO="$(printf '%s' "${{ secrets.GCP_ARTIFACT_REPO }}" | tr -d '\r\n')"
+
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPO}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
 
           docker build -t "$IMAGE" .
           docker push "$IMAGE"
@@ -46,13 +48,17 @@ jobs:
 
       - name: Deploy to Cloud Run
         run: |
+          # Default to the current supported model if not configured as a secret
+          GEMINI_MODEL_VALUE="${{ secrets.GEMINI_MODEL || 'gemini-2.5-flash' }}"
+          VERTEX_LOCATION_VALUE="${{ secrets.GCP_VERTEX_LOCATION || 'us-central1' }}"
+
           gcloud run deploy "${{ env.SERVICE_NAME }}" \
             --image "$IMAGE" \
             --region "${{ secrets.GCP_REGION }}" \
             --platform managed \
             --allow-unauthenticated \
             --service-account "${{ secrets.GCP_RUNTIME_SERVICE_ACCOUNT_EMAIL }}" \
-            --set-env-vars "APP_ENV=prod,RAG_DB_PATH=/tmp/rag.sqlite,RAG_TOP_K=5,VERTEX_LOCATION=${{ secrets.GCP_VERTEX_LOCATION }},GEMINI_MODEL=${{ secrets.GEMINI_MODEL }}" \
+            --set-env-vars "APP_ENV=prod,RAG_DB_PATH=/tmp/rag.sqlite,RAG_TOP_K=5,VERTEX_LOCATION=${VERTEX_LOCATION_VALUE},GEMINI_MODEL=${GEMINI_MODEL_VALUE}" \
             --set-env-vars "GOOGLE_CLOUD_PROJECT=${{ secrets.GCP_PROJECT_ID }}" \
             --set-env-vars "PAYPAL_ENV=${{ secrets.PAYPAL_ENV }}" \
             --set-env-vars "PAYPAL_CLIENT_ID=${{ secrets.PAYPAL_CLIENT_ID }}" \

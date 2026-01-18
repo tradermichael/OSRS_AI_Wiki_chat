@@ -17,8 +17,14 @@ class Settings(BaseSettings):
     rag_db_path: str = "./data/rag.sqlite"
     rag_top_k: int = 5
 
+    # Path to RAG sources configuration JSON (repo root defaults to rag_sources.json).
+    rag_sources_path: str | None = None
+
     # Fake "gold" donation counter. Defaults to RAG_DB_PATH if not set.
     gold_db_path: str | None = None
+
+    # Public chat history log storage. Defaults to RAG_DB_PATH if not set.
+    history_db_path: str | None = None
 
     paypal_env: str = "sandbox"  # sandbox|live
     paypal_client_id: str | None = None

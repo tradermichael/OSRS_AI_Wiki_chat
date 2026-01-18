@@ -3,18 +3,37 @@ from __future__ import annotations
 from .store import RetrievedChunk
 
 
-def build_rag_prompt(*, user_message: str, chunks: list[RetrievedChunk]) -> str:
+def _filter_allowed(chunks: list[RetrievedChunk], allowed_url_prefixes: list[str] | None) -> list[RetrievedChunk]:
+    if not allowed_url_prefixes:
+        return chunks
+    prefixes = tuple(p for p in allowed_url_prefixes if p)
+    if not prefixes:
+        return chunks
+    return [c for c in chunks if (c.url or "").startswith(prefixes)]
+
+
+def build_rag_prompt(
+    *,
+    user_message: str,
+    chunks: list[RetrievedChunk],
+    allowed_url_prefixes: list[str] | None = None,
+) -> str:
+    chunks = _filter_allowed(chunks, allowed_url_prefixes)
     context_lines: list[str] = []
     for i, ch in enumerate(chunks, start=1):
         title = ch.title or "(untitled)"
         url = ch.url or ""
-        context_lines.append(f"[Source {i}] {title} — {url}\n{ch.text}")
+        snippet = (ch.text or "").strip()
+        if len(snippet) > 700:
+            snippet = snippet[:700] + "…"
+        context_lines.append(f"[Source {i}] {title} — {url}\n{snippet}")
 
     context = "\n\n".join(context_lines) if context_lines else "(no sources retrieved)"
 
     return (
         "You are a helpful assistant for Old School RuneScape questions. "
         "Use the provided sources when answering. If the sources do not contain the answer, say you don't know. "
+        "Do not output long verbatim excerpts; paraphrase in your own words. "
         "When you use a source, cite it like [Source 1], [Source 2].\n\n"
         f"SOURCES:\n{context}\n\n"
         f"USER QUESTION:\n{user_message}\n\n"

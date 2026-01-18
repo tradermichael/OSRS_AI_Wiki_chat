@@ -76,13 +76,26 @@ class RAGStore:
             )
         self._conn.commit()
 
-    def query(self, *, text: str, top_k: int | None = None) -> list[RetrievedChunk]:
+    def query(
+        self,
+        *,
+        text: str,
+        top_k: int | None = None,
+        allowed_url_prefixes: list[str] | None = None,
+    ) -> list[RetrievedChunk]:
         top_k = int(top_k or settings.rag_top_k)
 
         cur = self._conn.cursor()
         rows = cur.execute("SELECT id, url, title, text FROM chunks").fetchall()
         if not rows:
             return []
+
+        if allowed_url_prefixes:
+            prefixes = tuple(p for p in allowed_url_prefixes if p)
+            if prefixes:
+                rows = [r for r in rows if str(r["url"] or "").startswith(prefixes)]
+                if not rows:
+                    return []
 
         corpus_texts = [r["text"] for r in rows]
         tokenized_corpus = [_tokenize(t) for t in corpus_texts]

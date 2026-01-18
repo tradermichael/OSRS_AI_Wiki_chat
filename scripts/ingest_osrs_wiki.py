@@ -12,20 +12,26 @@ if str(REPO_ROOT) not in sys.path:
 
 from backend.app.rag.ingest_mediawiki import chunk_page, search_and_fetch
 from backend.app.rag.store import RAGStore, make_chunk_id
-
-
-OSRS_WIKI_API = "https://oldschool.runescape.wiki/api.php"
-FANDOM_WIKI_API = "https://oldschoolrunescape.fandom.com/api.php"
-
+from backend.app.core.rag_sources import get_source_by_id
 
 async def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--wiki", choices=["osrs", "fandom"], default="osrs")
+    p.add_argument(
+        "--source",
+        default="osrs",
+        help="Source id from rag_sources.json (default: osrs)",
+    )
     p.add_argument("--query", required=True)
     p.add_argument("--limit", type=int, default=3)
     args = p.parse_args()
 
-    api = OSRS_WIKI_API if args.wiki == "osrs" else FANDOM_WIKI_API
+    source = get_source_by_id(args.source)
+    if not source:
+        raise SystemExit(
+            f"Unknown source '{args.source}'. Update rag_sources.json (repo root) to manage sources."
+        )
+
+    api = source.mediawiki_api
 
     pages = await search_and_fetch(api, args.query, limit=args.limit)
 

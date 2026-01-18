@@ -20,16 +20,36 @@
       </nav>
     </header>
 
-    <main class="chat">
-      <div id="messages" class="messages"></div>
-      <form id="chatForm" class="composer">
-        <input id="message" placeholder="Ask something about OSRS..." autocomplete="off" />
-        <button type="submit">Send</button>
-      </form>
-      <div class="hint">
-        Uses RAG over your ingested wiki chunks. Configure Gemini via Vertex AI env vars.
-      </div>
-    </main>
+    <div class="app-layout">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <div class="sidebar-title">Public Chat Log</div>
+          <button id="refreshHistory" type="button" class="sidebar-btn">Refresh</button>
+        </div>
+        <div class="sidebar-note">
+          Notice: all interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
+        </div>
+        <div id="historyList" class="history"></div>
+      </aside>
+
+      <main class="chat">
+        <div class="public-notice">
+          All interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
+        </div>
+        <div id="viewBanner" class="view-banner" hidden>
+          <span id="viewBannerText"></span>
+          <button id="resumeChat" type="button">Resume live chat</button>
+        </div>
+        <div id="messages" class="messages"></div>
+        <form id="chatForm" class="composer">
+          <input id="message" placeholder="Ask something about OSRS..." autocomplete="off" />
+          <button type="submit">Send</button>
+        </form>
+        <div class="hint">
+          Sources are cited from configured OSRS wiki sites.
+        </div>
+      </main>
+    </div>
   </div>
 
   <script src="/static/background.js"></script>

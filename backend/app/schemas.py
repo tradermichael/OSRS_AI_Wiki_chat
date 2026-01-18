@@ -43,3 +43,15 @@ class GoldDonateRequest(BaseModel):
 
 class GoldTotalResponse(BaseModel):
     total_gold: int
+
+
+class PublicHistoryItem(BaseModel):
+    id: int
+    created_at: str
+    user_message: str
+    bot_answer: str
+    sources: list[dict] = []
+
+
+class PublicHistoryListResponse(BaseModel):
+    items: list[PublicHistoryItem]

@@ -1,0 +1,20 @@
+{
+  "sources": [
+    {
+      "id": "osrs",
+      "name": "Old School RuneScape Wiki",
+      "mediawiki_api": "https://oldschool.runescape.wiki/api.php",
+      "allowed_url_prefixes": [
+        "https://oldschool.runescape.wiki/"
+      ]
+    },
+    {
+      "id": "osrs_fandom",
+      "name": "Old School RuneScape Wiki (Fandom)",
+      "mediawiki_api": "https://oldschoolrunescape.fandom.com/api.php",
+      "allowed_url_prefixes": [
+        "https://oldschoolrunescape.fandom.com/wiki/"
+      ]
+    }
+  ]
+}
