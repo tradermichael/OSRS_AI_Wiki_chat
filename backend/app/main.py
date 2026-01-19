@@ -20,6 +20,7 @@ from .rag.answer_cache import AnswerCacheStore
 from .rag.live_query import live_query_chunks, live_search_web_and_fetch_chunks
 from .rag.prompting import build_rag_prompt
 from .rag.query_expansion import derive_search_queries, extract_keywords
+from .rag.quest_registry import find_quest_title_in_text, load_osrs_quest_titles
 from .rag.store import RAGStore
 from .rag.store import make_chunk_id
 from .rag.wiki_preview import fetch_wiki_preview
@@ -45,6 +46,16 @@ app = FastAPI(title="OSRS AI Wiki Chat")
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.on_event("startup")
+async def _startup_prefetch() -> None:
+    # Best-effort: load a list of quests so we can recognize quest names even when the user types them in lowercase.
+    # If it fails, the app still works (we fall back to heuristic topic extraction).
+    try:
+        await load_osrs_quest_titles()
+    except Exception:
+        pass
 
 
 @app.get("/")
@@ -181,6 +192,12 @@ async def _chat_impl(
         t = (text or "").strip()
         if not t:
             return ""
+
+        # If the message contains a known quest title (even in lowercase), prefer it.
+        qtitle = find_quest_title_in_text(t)
+        if qtitle:
+            return qtitle
+
         # Prefer explicit "about X" phrasing.
         import re
 
@@ -199,6 +216,9 @@ async def _chat_impl(
         if caps:
             cand = str(caps[-1] or "").strip().strip("?!.\"")
             cand = re.sub(r"\s+", " ", cand)
+            # Avoid common false-positive captures for pronouns like: "How do I ..." -> "I".
+            if cand in {"I", "Me", "You"}:
+                cand = ""
             if 1 <= len(cand) <= 80:
                 return cand
 
@@ -216,6 +236,23 @@ async def _chat_impl(
                     continue
                 out.append(p[:1].upper() + p[1:])
             return " ".join(out)
+
+        # Lowercase-friendly quest fallback: capture entity after quest verbs.
+        # e.g. "how do I start dragon slayer?" -> "Dragon Slayer" (which should redirect).
+        m_q = re.search(
+            r"\b(?:start|begin|complete|finish)\s+(?:the\s+)?([a-z0-9][a-z0-9'\- ]{2,80})",
+            t,
+            flags=re.IGNORECASE,
+        )
+        if m_q:
+            tail = (m_q.group(1) or "").strip()
+            tail = re.sub(r"\s+", " ", tail).strip("?!.\"'")
+            words = tail.split()
+            tail = " ".join(words[:6])
+            if tail:
+                titled = _smart_title_case(tail)
+                if 1 <= len(titled) <= 80:
+                    return titled
 
         # Lowercase-friendly fallback: pull entity after common combat verbs.
         # e.g. "how do I beat the whisperer?" -> "The Whisperer"
