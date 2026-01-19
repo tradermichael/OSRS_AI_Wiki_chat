@@ -359,20 +359,6 @@ async def gemini_live_websocket(ws: WebSocket):
         await ws.close(code=1011)
         return
 
-    # Guard against a common misconfiguration: truncated model names.
-    # The intended model is e.g. "gemini-live-2.5-flash-native-audio".
-    if model in {"gemini-live-2.5-flash-native-a", "gemini-live-2.5-flash-native"} or model.endswith("-native-a"):
-        await ws.send_json(
-            {
-                "type": "error",
-                "detail": (
-                    f"Invalid GEMINI_LIVE_MODEL '{model}'. Did you mean 'gemini-live-2.5-flash-native-audio'?"
-                ),
-            }
-        )
-        await ws.close(code=1011)
-        return
-
     try:
         start_raw = await ws.receive_text()
         start_msg = json.loads(start_raw)
@@ -384,6 +370,49 @@ async def gemini_live_websocket(ws: WebSocket):
     if (start_msg.get("type") or "start") != "start":
         await ws.send_json({"type": "error", "detail": "First message must be {type:'start', ...}."})
         await ws.close(code=1003)
+        return
+
+    def _normalize_model_name(m: str) -> str:
+        m = (m or "").strip()
+        # Accept full resource paths like "projects/.../publishers/google/models/<id>"
+        if "/models/" in m:
+            m = m.rsplit("/models/", 1)[-1].strip()
+        return m
+
+    # Allow the client to request a specific live model (still validated on the server).
+    requested_model = _normalize_model_name(str(start_msg.get("model") or start_msg.get("modelId") or ""))
+    if requested_model:
+        allowed = {
+            "gemini-live-2.5-flash-native-audio",
+            "gemini-live-2.5-flash-exp-native-audio",
+        }
+        if requested_model not in allowed:
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "detail": f"Unsupported live model '{requested_model}'.",
+                    "hint": "Use 'gemini-live-2.5-flash-native-audio'.",
+                    "model": requested_model,
+                    "location": location,
+                }
+            )
+            await ws.close(code=1011)
+            return
+        model = requested_model
+
+    # Guard against a common misconfiguration: truncated model names.
+    # The intended model is e.g. "gemini-live-2.5-flash-native-audio".
+    if model in {"gemini-live-2.5-flash-native-a", "gemini-live-2.5-flash-native"} or model.endswith("-native-a"):
+        await ws.send_json(
+            {
+                "type": "error",
+                "detail": f"Invalid GEMINI_LIVE_MODEL '{model}'.",
+                "hint": "Did you mean 'gemini-live-2.5-flash-native-audio'?",
+                "model": model,
+                "location": location,
+            }
+        )
+        await ws.close(code=1011)
         return
 
     system_instruction = (start_msg.get("systemInstruction") or "").strip() or (

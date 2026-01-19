@@ -660,7 +660,12 @@ function initVoiceChat() {
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = false;
       pushToTalkBtn.textContent = 'Hold to talk (release to get reply)';
       // Start the Live session.
-      try { ws.send(JSON.stringify({ type: 'start' })); } catch { /* ignore */ }
+      try {
+        ws.send(JSON.stringify({
+          type: 'start',
+          model: 'gemini-live-2.5-flash-native-audio',
+        }));
+      } catch { /* ignore */ }
     });
 
     ws.addEventListener('message', async (evt) => {
