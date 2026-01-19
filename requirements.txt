@@ -12,3 +12,4 @@ youtube-transcript-api==0.6.2
 beautifulsoup4==4.12.3
 typing_extensions==4.15.0
 google-cloud-speech==2.36.0
+python-multipart==0.0.21
