@@ -249,6 +249,16 @@ async def _chat_impl(
         m = (message or "").strip().lower()
         if not m:
             return False
+        import re
+
+        # Common "consensus" phrasing (including common typos).
+        if re.search(r"\b(save|saved|saving|leave|leaving|left)\b.*\bla(?:st|t)\b", m):
+            return True
+        if re.search(r"\b(quest|quests)\b.*\b(la(?:st|t)|final)\b", m):
+            return True
+        if ("quest cape" in m or "quest point cape" in m) and any(w in m for w in ("people", "most", "usually", "common", "popular")):
+            return True
+
         # Community / subjective questions usually benefit from wider-web sources.
         needles = (
             "hardest",
@@ -288,6 +298,71 @@ async def _chat_impl(
             "opinion",
         )
         return any(n in m for n in needles)
+
+    def _extract_json_object(text: str) -> dict | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end < 0 or end <= start:
+            return None
+        try:
+            obj = json.loads(raw[start : end + 1])
+        except Exception:
+            return None
+        return obj if isinstance(obj, dict) else None
+
+    def _llm_intent_is_community(message: str) -> bool | None:
+        """Return True/False if the LLM can confidently classify; else None.
+
+        Only runs when Vertex is configured.
+        """
+
+        if not settings.google_cloud_project:
+            return None
+
+        msg = (message or "").strip()
+        if not msg:
+            return None
+
+        # Keep cost/latency bounded.
+        msg = msg[:800]
+
+        prompt = (
+            "You are classifying an Old School RuneScape question.\n"
+            "Return ONLY JSON with keys intent and confidence.\n"
+            "intent MUST be one of: community, gameplay\n"
+            "confidence MUST be a number from 0 to 1.\n\n"
+            "Definitions:\n"
+            "- community: asking what players think/do/say; popularity; what most people save for last; tier lists; reddit-style consensus.\n"
+            "- gameplay: asking factual game info, mechanics, requirements, walkthroughs, how-to steps, or setup.\n\n"
+            f"Question: {msg}\n"
+        )
+
+        try:
+            res = GeminiVertexClient().generate(prompt).text
+            obj = _extract_json_object(res)
+            if not obj:
+                return None
+            intent = str(obj.get("intent") or "").strip().lower()
+            try:
+                conf_raw = obj.get("confidence")
+                if conf_raw is None:
+                    conf = 0.0
+                else:
+                    conf = float(str(conf_raw).strip())
+            except Exception:
+                conf = 0.0
+            if conf < 0.70:
+                return None
+            if intent == "community":
+                return True
+            if intent == "gameplay":
+                return False
+            return None
+        except Exception:
+            return None
 
     def _topic_hint_from_text(text: str) -> str:
         t = (text or "").strip()
@@ -563,6 +638,15 @@ async def _chat_impl(
         force_fresh = True
 
     opinion_question = _looks_like_opinion_or_community_question(user_message)
+    # LLM intent classification (best-effort): helps distinguish consensus questions from factual wiki questions.
+    llm_intent = _llm_intent_is_community(user_message)
+    if llm_intent is True:
+        opinion_question = True
+        actions.append("LLM judged this as a community/opinion question.")
+    elif llm_intent is False and opinion_question:
+        # If heuristic fired but LLM is confident it's factual/gameplay, prefer gameplay behavior.
+        opinion_question = False
+        actions.append("LLM judged this as a gameplay/factual question.")
     if opinion_question:
         # Cached answers tend to overfit generic overlaps (e.g., "quest") on opinion prompts.
         force_fresh = True
@@ -636,6 +720,23 @@ async def _chat_impl(
     # If we can infer a specific boss/topic from the prior turn and the user is
     # asking for tactics, search the boss's /Strategies page first.
     queries = derive_search_queries(retrieval_seed)
+
+    def _primary_live_query(*, raw: str, topic_hint: str, queries: list[str], fallback: str) -> str:
+        # For live retrieval (MediaWiki + CSE), prefer an explicit topic hint or the user's raw phrasing.
+        # This avoids over-aggressive keyword stripping producing bad queries like "waht song elves".
+        th = (topic_hint or "").strip()
+        if th:
+            return th
+        r = (raw or "").strip()
+        if r and len(r) >= 8:
+            return r
+        # Otherwise prefer the longest derived query (usually the least lossy).
+        best = ""
+        for q in (queries or []):
+            qq = (q or "").strip()
+            if len(qq) > len(best):
+                best = qq
+        return best or (fallback or "").strip()
     if strategy_followup:
         strat = f"{topic_hint}/Strategies"
         boosted = [strat, f"{topic_hint} strategies", topic_hint]
@@ -753,8 +854,12 @@ async def _chat_impl(
     if not chunks or weak_local or force_fresh:
         await _status("Consulting the OSRS Wiki's enchanted index...")
         live_chunks: list = []
-        # Prefer the most focused query (first derived query).
-        primary_q = (queries[0] if queries else retrieval_seed)
+        primary_q = _primary_live_query(
+            raw=raw_user_message,
+            topic_hint=topic_hint,
+            queries=queries,
+            fallback=retrieval_seed,
+        )
         live_chunks.extend(await live_query_chunks(primary_q, allowed_url_prefixes=prefixes))
         live_chunks = live_chunks[:8]
         if live_chunks:
@@ -900,7 +1005,12 @@ async def _chat_impl(
                 used_query = ""
 
             if web_hits:
-                web_query = used_query or (queries[0] if queries else retrieval_seed)
+                web_query = used_query or _primary_live_query(
+                    raw=raw_user_message,
+                    topic_hint=topic_hint,
+                    queries=queries,
+                    fallback=retrieval_seed,
+                )
                 web_results = [
                     WebSearchResult(
                         title=str((r.title or "")[:120]),
@@ -1057,7 +1167,12 @@ async def _chat_impl(
     if (not prompt_chunks) and chunks and (not force_fresh):
         try:
             await _status("Those pages seemed irrelevant; searching anew...")
-            retry_q = (queries[0] if queries else retrieval_seed)
+            retry_q = _primary_live_query(
+                raw=raw_user_message,
+                topic_hint=topic_hint,
+                queries=queries,
+                fallback=retrieval_seed,
+            )
             live_chunks = await live_query_chunks(retry_q, allowed_url_prefixes=prefixes)
             if live_chunks:
                 actions.append("Local sources looked irrelevant; refreshed wiki search.")
