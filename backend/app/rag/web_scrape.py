@@ -4,6 +4,7 @@ import ipaddress
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
+from urllib.parse import urlunparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -55,6 +56,86 @@ def is_safe_public_url(url: str) -> bool:
     return True
 
 
+def _maybe_rewrite_reddit_url(url: str) -> str:
+    """Rewrite Reddit URLs to old.reddit.com for server-rendered HTML.
+
+    Modern Reddit pages are often heavily client-rendered, which results in near-empty
+    HTML for scraping. old.reddit.com provides usable HTML for extracting post/comment text.
+    """
+
+    try:
+        u = urlparse(url)
+    except Exception:
+        return url
+
+    host = (u.hostname or "").lower()
+    if not host:
+        return url
+
+    if host in {"reddit.com", "www.reddit.com", "m.reddit.com"}:
+        # Preserve path/query/fragment.
+        return urlunparse((u.scheme or "https", "old.reddit.com", u.path or "", u.params or "", u.query or "", u.fragment or ""))
+
+    return url
+
+
+def _extract_reddit_text(html: str) -> tuple[str | None, str]:
+    """Extract readable post + comment text from old Reddit HTML."""
+
+    if not html:
+        return (None, "")
+
+    soup = BeautifulSoup(html, "html.parser")
+
+    # Drop non-content sections.
+    for tag in soup(["script", "style", "noscript", "svg", "canvas", "iframe"]):
+        tag.decompose()
+
+    title = None
+    a = soup.select_one("a.title")
+    if a and a.get_text(strip=True):
+        title = a.get_text(strip=True)[:200] or None
+    elif soup.title and soup.title.string:
+        title = str(soup.title.string).strip()[:200] or None
+
+    parts: list[str] = []
+
+    post_md = soup.select_one("div.expando div.usertext-body div.md")
+    if post_md:
+        post_text = post_md.get_text("\n", strip=True)
+        post_text = re.sub(r"\n{3,}", "\n\n", (post_text or "").strip())
+        if post_text:
+            parts.append("Post:\n" + post_text)
+
+    # Grab a handful of comment bodies (old Reddit keeps them in .comment .md).
+    comment_mds = soup.select("div.comment div.entry div.usertext-body div.md")
+    comments: list[str] = []
+    for md in comment_mds[:20]:
+        txt = md.get_text("\n", strip=True)
+        txt = re.sub(r"\n{3,}", "\n\n", (txt or "").strip())
+        # Skip ultra-short noise.
+        if not txt or len(txt) < 40:
+            continue
+        comments.append(txt)
+        if len(comments) >= 8:
+            break
+
+    if comments:
+        joined = "\n\n".join(f"- {c}" for c in comments)
+        parts.append("Top comments:\n" + joined)
+
+    text = "\n\n".join(parts).strip()
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[\t\r]+", " ", text)
+    text = re.sub(r" {2,}", " ", text)
+    text = text.strip()
+
+    # If we couldn't find anything meaningful, return empty so callers can fall back.
+    if len(text) < 160:
+        return (title, "")
+    return (title, text)
+
+
 async def fetch_html(
     url: str,
     *,
@@ -71,7 +152,8 @@ async def fetch_html(
 
     timeout = httpx.Timeout(timeout_s)
     headers = {
-        "User-Agent": "OSRS-AI-Wiki-Chat/0.1 (+https://oldschool.runescape.wiki)",
+        # Use a browser-like UA; some sites (notably Reddit) block overly-generic agents.
+        "User-Agent": "Mozilla/5.0 (compatible; OSRS-AI-Wiki-Chat/0.1; +https://oldschool.runescape.wiki)",
         "Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
     }
 
@@ -175,11 +257,20 @@ async def fetch_and_extract_page(
     timeout_s: float = 15.0,
     max_bytes: int = 800_000,
 ) -> WebPage | None:
+    url = _maybe_rewrite_reddit_url(url)
+
     final_url, html = await fetch_html(url, timeout_s=timeout_s, max_bytes=max_bytes)
     if not final_url or not html:
         return None
 
-    title, text = extract_readable_text(html)
+    host = (urlparse(final_url).hostname or "").lower()
+    if host.endswith("reddit.com"):
+        title, text = _extract_reddit_text(html)
+        if not text:
+            # Fall back to generic extraction if reddit-specific parsing failed.
+            title, text = extract_readable_text(html)
+    else:
+        title, text = extract_readable_text(html)
     if not text:
         return None
 

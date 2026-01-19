@@ -25,6 +25,7 @@ from .rag.query_expansion import derive_search_queries, extract_keywords
 from .rag.quest_registry import find_quest_title_in_text, load_osrs_quest_titles
 from .rag.store import RAGStore
 from .rag.store import make_chunk_id
+from .rag.store import RetrievedChunk
 from .rag.wiki_preview import fetch_wiki_preview
 from .rag.google_cse import url_to_title
 from .rag.youtube import quest_youtube_videos_with_summaries, quest_youtube_insight_chunks
@@ -186,6 +187,7 @@ async def _chat_impl(
     actions: list[str] = []
     web_query: str | None = None
     web_results: list[WebSearchResult] = []
+    used_web_snippets = False
 
     async def _status(msg: str) -> None:
         if status_cb:
@@ -949,6 +951,46 @@ async def _chat_impl(
             elif web_hits:
                 actions.append("Web search found leads, but I couldn't fetch allowed wiki pages from them.")
 
+                # If we can't fetch full wiki pages (e.g., results are Reddit/community links),
+                # fall back to using the search result snippets as limited citations.
+                # This allows the assistant to answer with sources even when the destination
+                # site blocks scraping or isn't a MediaWiki page.
+                if not chunks:
+                    try:
+                        import re
+
+                        terms = extract_keywords(primary_q, max_terms=10)
+
+                        def _snip_score(r) -> int:
+                            hay = "\n".join([str(getattr(r, "title", "") or ""), str(getattr(r, "snippet", "") or ""), str(getattr(r, "url", "") or "")]).lower()
+                            return sum(1 for t in (terms or []) if t and t.lower() in hay)
+
+                        ranked_hits = sorted([r for r in (web_hits or []) if getattr(r, "url", None)], key=_snip_score, reverse=True)
+                        snippet_chunks: list[RetrievedChunk] = []
+                        for r in ranked_hits[:5]:
+                            u = str(r.url)
+                            snip = (str(getattr(r, "snippet", "") or "") or "").strip()
+                            snip = re.sub(r"\s+", " ", snip)
+                            if not u or len(snip) < 40:
+                                continue
+                            t = str(getattr(r, "title", "") or "(search result)")
+                            snippet_chunks.append(
+                                RetrievedChunk(
+                                    text=f"Search snippet: {snip}",
+                                    url=u,
+                                    title=f"[Web Snippet] {t[:180]}",
+                                )
+                            )
+                            if len(snippet_chunks) >= 4:
+                                break
+
+                        if snippet_chunks:
+                            actions.append("Used search-result snippets as limited citations (couldn't fetch full pages).")
+                            chunks = snippet_chunks
+                            used_web_snippets = True
+                    except Exception:
+                        pass
+
                 if settings.web_scrape_enabled:
                     await _status("Those leads are outside the wiki; carefully scraping for clues...")
                     try:
@@ -1063,6 +1105,42 @@ async def _chat_impl(
                 actions.append("Added community sources from the wider web (untrusted web).")
                 # Prefer community sources over generic wiki pages for opinion prompts.
                 chunks = scraped_chunks + (chunks or [])
+            elif web_hits and not chunks:
+                # As a last resort (e.g., Reddit blocks scraping), use snippets so we can still cite community leads.
+                try:
+                    import re
+
+                    terms = extract_keywords(used_query or (raw_user_message or user_message or retrieval_seed), max_terms=10)
+
+                    def _snip_score(r) -> int:
+                        hay = "\n".join([str(getattr(r, "title", "") or ""), str(getattr(r, "snippet", "") or ""), str(getattr(r, "url", "") or "")]).lower()
+                        return sum(1 for t in (terms or []) if t and t.lower() in hay)
+
+                    ranked_hits = sorted([r for r in (web_hits or []) if getattr(r, "url", None)], key=_snip_score, reverse=True)
+                    snippet_chunks: list[RetrievedChunk] = []
+                    for r in ranked_hits[:6]:
+                        u = str(r.url)
+                        snip = (str(getattr(r, "snippet", "") or "") or "").strip()
+                        snip = re.sub(r"\s+", " ", snip)
+                        if not u or len(snip) < 40:
+                            continue
+                        t = str(getattr(r, "title", "") or "(search result)")
+                        snippet_chunks.append(
+                            RetrievedChunk(
+                                text=f"Search snippet: {snip}",
+                                url=u,
+                                title=f"[Web Snippet] {t[:180]}",
+                            )
+                        )
+                        if len(snippet_chunks) >= 4:
+                            break
+
+                    if snippet_chunks:
+                        actions.append("Used community search snippets as citations (couldn't scrape full pages).")
+                        chunks = snippet_chunks
+                        used_web_snippets = True
+                except Exception:
+                    pass
         else:
             actions.append("Tip: enable WEB_SCRAPE_ENABLED=true to cite community sources like Reddit.")
 
@@ -1072,6 +1150,7 @@ async def _chat_impl(
         retrieval_seed: str,
         topic_hint: str,
         prefixes: list[str],
+        allow_external_sources: bool,
     ) -> list:
         # De-dupe by URL before prompting so citation numbers match what we display.
         # BUT: include multiple relevant excerpts from the same page so we don't miss terms
@@ -1109,8 +1188,8 @@ async def _chat_impl(
             if not u:
                 continue
             # Normally, keep citations on the configured wiki domains.
-            # If web scraping is enabled, allow external URLs too.
-            if prefixes_t and not u.startswith(prefixes_t) and not bool(settings.web_scrape_enabled):
+            # If external sources are allowed, allow external URLs too.
+            if prefixes_t and not u.startswith(prefixes_t) and not bool(allow_external_sources):
                 continue
             url_to_chunks.setdefault(u, []).append(c)
 
@@ -1171,11 +1250,14 @@ async def _chat_impl(
 
         return prompt_chunks
 
+    allow_external_sources = bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help) or used_web_snippets)
+
     prompt_chunks = _build_prompt_chunks(
         chunks=chunks,
         retrieval_seed=retrieval_seed,
         topic_hint=topic_hint,
         prefixes=prefixes,
+        allow_external_sources=allow_external_sources,
     )
 
     # Add YouTube-derived insights as additional citable sources (best-effort).
@@ -1194,6 +1276,7 @@ async def _chat_impl(
                     retrieval_seed=retrieval_seed,
                     topic_hint=topic_hint,
                     prefixes=prefixes,
+                    allow_external_sources=allow_external_sources,
                 )
                 actions.append("Added YouTube guide insights as sources.")
         except Exception:
@@ -1219,16 +1302,23 @@ async def _chat_impl(
                     retrieval_seed=retrieval_seed,
                     topic_hint=topic_hint,
                     prefixes=prefixes,
+                    allow_external_sources=allow_external_sources,
                 )
         except Exception:
             pass
 
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
-        fallback = (
-            "I couldn't find any citable OSRS Wiki sources for that question just now. "
-            "Please try rephrasing your question or ask about a different topic."
-        )
+        if bool(settings.web_scrape_enabled) or (web_results and len(web_results) > 0):
+            fallback = (
+                "I couldn't fetch any citable sources for that question just now (wiki or community). "
+                "Please try rephrasing your question or ask about a different topic."
+            )
+        else:
+            fallback = (
+                "I couldn't find any citable OSRS Wiki sources for that question just now. "
+                "Please try rephrasing your question or ask about a different topic."
+            )
         videos: list[VideoItem] = []
         if quest_help:
             try:
@@ -1261,7 +1351,7 @@ async def _chat_impl(
         conversation_context=conversation_context,
         chunks=prompt_chunks,
         allowed_url_prefixes=prefixes,
-        allow_external_sources=bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help)),
+        allow_external_sources=bool(allow_external_sources),
     )
 
     client = GeminiVertexClient()
@@ -1382,6 +1472,7 @@ async def _chat_impl(
                     retrieval_seed=retry_seed,
                     topic_hint=topic_hint,
                     prefixes=prefixes,
+                    allow_external_sources=allow_external_sources,
                 )
                 if retry_prompt_chunks:
                     retry_prompt = build_rag_prompt(
@@ -1389,7 +1480,7 @@ async def _chat_impl(
                         conversation_context=conversation_context,
                         chunks=retry_prompt_chunks,
                         allowed_url_prefixes=prefixes,
-                        allow_external_sources=bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help)),
+                        allow_external_sources=bool(allow_external_sources),
                     )
                     res = client.generate(retry_prompt)
                     prompt_chunks = retry_prompt_chunks
@@ -1413,6 +1504,7 @@ async def _chat_impl(
                 retrieval_seed=retry_seed,
                 topic_hint=topic_hint,
                 prefixes=prefixes,
+                allow_external_sources=allow_external_sources,
             )
             if retry_prompt_chunks:
                 retry_prompt = build_rag_prompt(
@@ -1420,7 +1512,7 @@ async def _chat_impl(
                     conversation_context=conversation_context,
                     chunks=retry_prompt_chunks,
                     allowed_url_prefixes=prefixes,
-                    allow_external_sources=bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help)),
+                    allow_external_sources=bool(allow_external_sources),
                 )
                 res = client.generate(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
