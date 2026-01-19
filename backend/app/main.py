@@ -893,6 +893,35 @@ async def _chat_impl(
         if not t:
             return ""
 
+        # Avoid latching onto sentence-starter capitalization (e.g., "There") or pronouns.
+        # These tend to appear in follow-ups like "Look again. There must be..." and break retrieval.
+        false_topics = {
+            "there",
+            "this",
+            "that",
+            "it",
+            "here",
+            "please",
+            "thanks",
+            "thank you",
+            "ok",
+            "okay",
+            "yes",
+            "no",
+            "him",
+            "her",
+            "them",
+            "they",
+            "he",
+            "she",
+            "we",
+            "i",
+            "you",
+            "me",
+            "my",
+            "your",
+        }
+
         # Ignore common meta/instruction messages that are not actual topics.
         t_l = t.lower().strip()
         if t_l in {
@@ -941,7 +970,8 @@ async def _chat_impl(
         if m:
             topic = m.group(1).strip().strip("?!.\"")
             if 1 <= len(topic) <= 60:
-                return topic
+                if topic.strip().lower() not in false_topics:
+                    return topic
 
         # Lowercase-friendly topic: users sometimes just type an entity name (e.g. "quest cape").
         # If it looks like a short noun phrase (not a question), use it as the topic.
@@ -949,7 +979,9 @@ async def _chat_impl(
             if re.fullmatch(r"[a-z0-9][a-z0-9'\- ]{2,60}", t, flags=re.IGNORECASE):
                 words = [w for w in re.split(r"\s+", t) if w]
                 if 1 <= len(words) <= 5:
-                    return _smart_title_case(" ".join(words))
+                    titled = _smart_title_case(" ".join(words))
+                    if titled.strip().lower() not in false_topics:
+                        return titled
 
         # Fall back: capture sequences of Title-Cased words, allowing Roman numerals and hyphenated subtitles.
         # Examples: "The Whisperer", "Desert Treasure II", "Desert Treasure II - The Fallen Empire".
@@ -958,13 +990,20 @@ async def _chat_impl(
 
         caps = re.findall(pattern, t)
         if caps:
-            cand = str(caps[-1] or "").strip().strip("?!.\"")
-            cand = re.sub(r"\s+", " ", cand)
-            # Avoid common false-positive captures for pronouns like: "How do I ..." -> "I".
-            if cand in {"I", "Me", "You"}:
-                cand = ""
-            if 1 <= len(cand) <= 80:
-                return cand
+            # Prefer the latest non-noise capture.
+            for raw in reversed(caps):
+                cand = str(raw or "").strip().strip("?!.\"")
+                cand = re.sub(r"\s+", " ", cand)
+                if not cand:
+                    continue
+                if cand in {"I", "Me", "You"}:
+                    continue
+                # Filter obvious false topics like "There".
+                if cand.strip().lower() in false_topics:
+                    continue
+                # Single-word captures are common (boss names), but avoid sentence-starters/noise.
+                if 1 <= len(cand) <= 80:
+                    return cand
 
         # Lowercase-friendly quest fallback: capture entity after quest verbs.
         # e.g. "how do I start dragon slayer?" -> "Dragon Slayer" (which should redirect).
@@ -1002,7 +1041,8 @@ async def _chat_impl(
                 if not titled.lower().startswith("the ") and (" the " in f" {t.lower()} "):
                     titled = "The " + titled
                 if 1 <= len(titled) <= 80:
-                    return titled
+                    if titled.strip().lower() not in false_topics:
+                        return titled
         return ""
 
     def _looks_like_strategy_question(message: str) -> bool:
@@ -1165,10 +1205,23 @@ async def _chat_impl(
     prev_topic_hint = _topic_hint_from_text(prev_user_message)
     cur_topic_hint = _topic_hint_from_text(user_message)
 
+    # If the immediate prior turn is a pronoun/meta follow-up, keep the last explicit topic from
+    # further back in the session so we don't lose context across multiple follow-ups.
+    history_topic_hint = ""
+    if prior_turns:
+        for t in prior_turns:
+            um = (t.user_message or "").strip()
+            if not um:
+                continue
+            hint = _topic_hint_from_text(um)
+            if hint:
+                history_topic_hint = hint
+                break
+
     pronoun_followup = bool(prev_user_message and _needs_pronoun_resolution(raw_user_message))
 
-    # Prefer current explicit topic when present; otherwise fall back to prior turn.
-    topic_hint = (cur_topic_hint or prev_topic_hint).strip()
+    # Prefer current explicit topic when present; otherwise fall back to prior turn, then session history.
+    topic_hint = (cur_topic_hint or prev_topic_hint or history_topic_hint).strip()
 
     # If the user explicitly mentions Seren/Fragment, prefer that as the topic so retrieval
     # can pull the correct boss/strategies pages.
