@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     vertex_location: str = "us-central1"
     gemini_model: str = "gemini-2.5-flash"
 
+    # Optional second-pass "judge" model to decide whether the draft answer is well-supported.
+    # If enabled and confidence is below threshold, the service will trigger live retrieval/web search and retry.
+    answer_judge_enabled: bool = False
+    answer_judge_threshold: float = 0.55
+    answer_judge_model: str | None = None
+
     rag_db_path: str = "./data/rag.sqlite"
     rag_top_k: int = 5
 

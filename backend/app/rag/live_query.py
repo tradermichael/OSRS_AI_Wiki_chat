@@ -29,6 +29,13 @@ def _query_title_hint(query: str) -> str:
         if 1 <= len(left) <= 80:
             return f"{left}/Strategies"
 
+    # Common phrasing: "strategies for X" / "strategy for X".
+    m_strat_for = re.search(r"\bstrateg(?:y|ies)\s+for\s+(?:the\s+)?(.+)$", q, flags=re.IGNORECASE)
+    if m_strat_for:
+        subj = re.sub(r"\s+", " ", (m_strat_for.group(1) or "").strip()).strip(" ?!.\"'")
+        if 1 <= len(subj) <= 80:
+            return f"{subj}/Strategies"
+
     m_quick = re.search(r"^\s*([^/]{2,120})\s*/\s*quick\s*_?\s*guide\b", q, flags=re.IGNORECASE)
     if m_quick:
         left = re.sub(r"\s+", " ", (m_quick.group(1) or "").strip()).strip(" ?!.\"'")
@@ -153,13 +160,36 @@ async def live_query_chunks(
         # If the query looks like a specific page title, bias towards fetching it (and /Strategies).
         hint = _query_title_hint(query)
 
+        used_direct_hint_titles = False
+
         # If the hint explicitly points at a known subpage, fetch it directly.
         subpage_suffixes = ("/strategies", "/quick_guide", "/walkthrough")
         if hint and hint.lower().endswith(subpage_suffixes):
-            base = hint.rsplit("/", 1)[0]
-            titles = [hint]
-            if base and base != hint:
-                titles.append(base)
+            base, subpage = hint.rsplit("/", 1)
+            candidates: list[str] = []
+
+            base_tc = None
+            if base and re.fullmatch(r"[a-z ]{2,80}", base):
+                base_tc = " ".join(w.capitalize() for w in base.split())
+
+            # Priority order: most likely correct titles first.
+            if base_tc:
+                candidates.append(f"The {base_tc}/{subpage}")
+                candidates.append(f"{base_tc}/{subpage}")
+            candidates.append(f"The {base}/{subpage}" if base and not base.lower().startswith("the ") else f"{base}/{subpage}")
+            candidates.append(f"{base}/{subpage}" if base else hint)
+
+            # Also fetch the base page for context.
+            if base_tc:
+                candidates.append(f"The {base_tc}")
+                candidates.append(base_tc)
+            if base and not base.lower().startswith("the "):
+                candidates.append(f"The {base}")
+            if base:
+                candidates.append(base)
+
+            titles = [t for t in dict.fromkeys(candidates) if t and t.strip()]
+            used_direct_hint_titles = True
         else:
             titles = []
 
@@ -189,13 +219,15 @@ async def live_query_chunks(
         if not titles:
             return []
 
-        ranked_titles = sorted(
-            list(dict.fromkeys(titles)),
-            key=lambda t: _title_score(title=t, query=query),
-            reverse=True,
-        )
-
-        picked_titles = ranked_titles[: max(2, int(max_pages_per_source))]
+        if used_direct_hint_titles:
+            picked_titles = titles[: max(2, int(max_pages_per_source))]
+        else:
+            ranked_titles = sorted(
+                list(dict.fromkeys(titles)),
+                key=lambda t: _title_score(title=t, query=query),
+                reverse=True,
+            )
+            picked_titles = ranked_titles[: max(2, int(max_pages_per_source))]
 
         pages = []
         try:

@@ -22,10 +22,13 @@ async def fetch_wiki_preview(*, mediawiki_api: str, title: str, thumb_size: int 
         "inprop": "url",
         "explaintext": "1",
         "exsectionformat": "plain",
-        "exintro": "1",
+        # Don't force exintro: many /Strategies pages start with templates/tables, yielding an empty intro.
+        # We'll fetch the full extract and take the first non-empty slice.
         "piprop": "thumbnail",
         "pithumbsize": str(int(thumb_size)),
+        "redirects": "1",
         "titles": title,
+        "exchars": "2200",
         "format": "json",
     }
 
@@ -40,5 +43,12 @@ async def fetch_wiki_preview(*, mediawiki_api: str, title: str, thumb_size: int 
     extract = (page or {}).get("extract") or ""
     fullurl = (page or {}).get("fullurl") or ""
     thumb = ((page or {}).get("thumbnail") or {}).get("source")
+
+    # Normalize and keep the preview short for the UI.
+    extract = str(extract)
+    extract = "\n".join([ln.strip() for ln in extract.splitlines()]).strip()
+    extract = "\n".join([ln for ln in extract.split("\n") if ln])
+    if len(extract) > 900:
+        extract = extract[:900].rstrip() + "…"
 
     return WikiPreview(title=title, url=str(fullurl), extract=str(extract), thumbnail_url=str(thumb) if thumb else None)

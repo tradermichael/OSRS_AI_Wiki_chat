@@ -106,6 +106,14 @@ def derive_search_queries(user_message: str) -> list[str]:
     queries: list[str] = []
 
     msg_l = msg.lower()
+
+    # Common OSRS naming: "Quest cape" is the "Quest point cape" page on the wiki.
+    # Adding this early prevents unrelated boss/strategy pages from matching on generic terms like "quest"/"cape".
+    if "quest cape" in msg_l and "quest point cape" not in msg_l:
+        queries.append("Quest point cape")
+        queries.append("Quest point cape requirements")
+        queries.append("Quest point cape osrs")
+
     combat_intent = any(
         w in msg_l
         for w in (

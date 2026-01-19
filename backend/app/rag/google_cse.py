@@ -14,10 +14,15 @@ class SearchResult:
     snippet: str | None = None
 
 
-def _clean_title_from_url_path(path: str) -> str | None:
-    # /w/Foo_bar or /wiki/Foo_bar
-    path = path or ""
-    path = path.strip("/")
+def _clean_title_from_url_path(path: str, *, marker: str) -> str | None:
+    """Extract a MediaWiki page title from a URL path.
+
+    Supports subpages.
+    Example:
+      /w/The_Whisperer/Strategies -> The Whisperer/Strategies
+    """
+
+    path = (path or "").strip("/")
     if not path:
         return None
 
@@ -25,11 +30,24 @@ def _clean_title_from_url_path(path: str) -> str | None:
     if len(parts) < 2:
         return None
 
-    slug = parts[-1]
-    slug = unquote(slug)
-    slug = slug.replace("_", " ")
-    slug = re.sub(r"\s+", " ", slug).strip()
-    return slug or None
+    try:
+        idx = parts.index(marker)
+    except ValueError:
+        return None
+
+    title_parts = parts[idx + 1 :]
+    if not title_parts:
+        return None
+
+    cleaned: list[str] = []
+    for seg in title_parts:
+        seg = unquote(seg)
+        seg = seg.replace("_", " ")
+        seg = re.sub(r"\s+", " ", seg).strip()
+        if seg:
+            cleaned.append(seg)
+
+    return "/".join(cleaned) if cleaned else None
 
 
 def url_to_title(url: str) -> str | None:
@@ -56,13 +74,13 @@ def url_to_title(url: str) -> str | None:
         except Exception:
             pass
 
-    # Old School wiki: /w/Title
+    # Old School wiki: /w/Title or /w/Title/Subpage
     if "/w/" in u.path:
-        return _clean_title_from_url_path(u.path)
+        return _clean_title_from_url_path(u.path, marker="w")
 
-    # Fandom: /wiki/Title
+    # Fandom/MediaWiki: /wiki/Title or /wiki/Title/Subpage
     if "/wiki/" in u.path:
-        return _clean_title_from_url_path(u.path)
+        return _clean_title_from_url_path(u.path, marker="wiki")
 
     return None
 

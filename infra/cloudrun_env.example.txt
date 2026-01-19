@@ -10,6 +10,11 @@ GCP_RUNTIME_SERVICE_ACCOUNT_EMAIL=osrs-ai-wiki-chat-runtime@YOUR_PROJECT.iam.gse
 
 GEMINI_MODEL=gemini-2.5-flash
 
+# Optional: LLM "judge" pass. If enabled and confidence < threshold, chat triggers live retrieval + retries once.
+# ANSWER_JUDGE_ENABLED=true
+# ANSWER_JUDGE_THRESHOLD=0.55
+# ANSWER_JUDGE_MODEL=gemini-2.5-flash
+
 # Google Programmable Search Engine (Custom Search JSON API)
 GOOGLE_CSE_API_KEY=
 GOOGLE_CSE_CX=

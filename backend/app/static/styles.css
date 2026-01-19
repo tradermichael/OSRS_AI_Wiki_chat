@@ -734,6 +734,35 @@ button:active {
   color: var(--text);
 }
 
+.donate-extras {
+  margin-top: 14px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+a.button-link {
+  display: inline-block;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(243, 210, 122, 0.55);
+  background: linear-gradient(180deg, rgba(243, 210, 122, 0.95), rgba(200, 155, 60, 0.92));
+  color: rgba(10, 8, 6, 0.95);
+  cursor: pointer;
+  font-weight: 700;
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.35);
+  text-decoration: none;
+}
+
+a.button-link:hover {
+  filter: brightness(1.04);
+}
+
+a.button-link:active {
+  transform: translateY(1px);
+}
+
 .hint {
   margin-top: 10px;
   color: rgba(40, 30, 20, 0.70);

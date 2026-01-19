@@ -15,6 +15,7 @@ from .gold.store import get_gold_store
 from .feedback.store import get_feedback_store
 from .history.store import get_public_chat_store
 from .llm.gemini_vertex import GeminiVertexClient
+from .llm.answer_judge import judge_answer_confidence
 from .payments.paypal import PayPalClient
 from .rag.answer_cache import AnswerCacheStore
 from .rag.live_query import live_query_chunks, live_search_web_and_fetch_chunks
@@ -164,6 +165,39 @@ async def _chat_impl(
         if status_cb:
             await status_cb(msg)
 
+    def _has_source_citations(text: str) -> bool:
+        import re
+
+        return bool(re.search(r"\[Source\s+\d+\]", text or ""))
+
+    def _is_low_confidence_answer(text: str) -> bool:
+        ans_l = (text or "").strip().lower()
+        if not ans_l:
+            return True
+        # Treat both plain and "medieval" refusals as low-confidence so we re-research.
+        phrases = (
+            "do not know",
+            "don't know",
+            "naught of",
+            "cant find",
+            "can't find",
+            "cannot find",
+            "no mention",
+            "not mentioned",
+            "not in the sources",
+            "not in my sources",
+            "sources do not",
+            "my sources do not",
+            "my knowledge is silent",
+            "knowledge is silent",
+            "silent on",
+            "speak not of",
+            "speak not",
+            "based on the wisdom i have",
+            "wisdom i have at hand",
+        )
+        return any(p in ans_l for p in phrases)
+
     def _needs_pronoun_resolution(message: str) -> bool:
         m = (message or "").strip().lower()
         if not m:
@@ -201,11 +235,34 @@ async def _chat_impl(
         # Prefer explicit "about X" phrasing.
         import re
 
+        def _smart_title_case(s: str) -> str:
+            parts = re.split(r"\s+", (s or "").strip())
+            out: list[str] = []
+            for p in parts:
+                if not p:
+                    continue
+                if re.fullmatch(r"[IVX]{1,8}", p, flags=re.IGNORECASE):
+                    out.append(p.upper())
+                    continue
+                if p.isdigit():
+                    out.append(p)
+                    continue
+                out.append(p[:1].upper() + p[1:])
+            return " ".join(out)
+
         m = re.search(r"\babout\s+(.+)$", t, flags=re.IGNORECASE)
         if m:
             topic = m.group(1).strip().strip("?!.\"")
             if 1 <= len(topic) <= 60:
                 return topic
+
+        # Lowercase-friendly topic: users sometimes just type an entity name (e.g. "quest cape").
+        # If it looks like a short noun phrase (not a question), use it as the topic.
+        if len(t) <= 60 and not re.match(r"^(how|what|when|where|who|why)\b", t, flags=re.IGNORECASE):
+            if re.fullmatch(r"[a-z0-9][a-z0-9'\- ]{2,60}", t, flags=re.IGNORECASE):
+                words = [w for w in re.split(r"\s+", t) if w]
+                if 1 <= len(words) <= 5:
+                    return _smart_title_case(" ".join(words))
 
         # Fall back: capture sequences of Title-Cased words, allowing Roman numerals and hyphenated subtitles.
         # Examples: "The Whisperer", "Desert Treasure II", "Desert Treasure II - The Fallen Empire".
@@ -221,21 +278,6 @@ async def _chat_impl(
                 cand = ""
             if 1 <= len(cand) <= 80:
                 return cand
-
-        def _smart_title_case(s: str) -> str:
-            parts = re.split(r"\s+", (s or "").strip())
-            out: list[str] = []
-            for p in parts:
-                if not p:
-                    continue
-                if re.fullmatch(r"[IVX]{1,8}", p, flags=re.IGNORECASE):
-                    out.append(p.upper())
-                    continue
-                if p.isdigit():
-                    out.append(p)
-                    continue
-                out.append(p[:1].upper() + p[1:])
-            return " ".join(out)
 
         # Lowercase-friendly quest fallback: capture entity after quest verbs.
         # e.g. "how do I start dragon slayer?" -> "Dragon Slayer" (which should redirect).
@@ -306,7 +348,6 @@ async def _chat_impl(
         return any(
             w in m
             for w in (
-                "quest",
                 "complete",
                 "finish",
                 "walkthrough",
@@ -377,8 +418,7 @@ async def _chat_impl(
     )
     if cached:
         # If the cached answer is explicitly low-confidence, force a fresh retrieval.
-        ans_l = (cached.answer or "").lower()
-        if any(p in ans_l for p in ("do not know", "don't know", "no mention", "naught of", "cannot find")):
+        if _is_low_confidence_answer(cached.answer or "") or not _has_source_citations(cached.answer or ""):
             cached = None
     if cached:
         actions.append("Returned a previously-prepared scroll (with citations).")
@@ -495,6 +535,13 @@ async def _chat_impl(
         if topic_terms:
             weak_local = weak_local or (hits_topic == 0)
 
+        # If this looks like a short entity query, prefer pages whose *titles* match the topic.
+        # This avoids false positives where a strategy page matches "cape" via gear lists.
+        if topic_terms and topic_hint and len(topic_hint.split()) <= 4:
+            title_hay = "\n".join(((c.title or "") for c in chunks)).lower()
+            hits_title = sum(1 for t in topic_terms[:2] if t and t in title_hay)
+            weak_local = weak_local or (hits_title == 0)
+
         # If we have a specific topic (boss/quest name), drop chunks that never mention it.
         # This reduces "random" sources from the local DB when the keyword overlap is weak.
         if chunks and topic_terms:
@@ -588,65 +635,88 @@ async def _chat_impl(
             else:
                 actions.append("Web search returned no usable leads (check CSE keys and site restriction).")
 
-    # De-dupe by URL before prompting so citation numbers match what we display.
-    # BUT: include multiple relevant excerpts from the same page so we don't miss
-    # terms that appear later in the article (e.g., user asks about "shadow realm").
-    # Prefer topic terms first when scoring chunks for prompting.
-    key_terms_for_prompt = []
-    if topic_hint:
-        key_terms_for_prompt.extend(extract_keywords(topic_hint, max_terms=6))
-    key_terms_for_prompt.extend(extract_keywords(retrieval_seed, max_terms=10))
-    # De-dupe while preserving order.
-    seen_k: set[str] = set()
-    key_terms_for_prompt = [t for t in key_terms_for_prompt if t and not (t in seen_k or seen_k.add(t))]
+    def _build_prompt_chunks(
+        *,
+        chunks: list,
+        retrieval_seed: str,
+        topic_hint: str,
+        prefixes: list[str],
+    ) -> list:
+        # De-dupe by URL before prompting so citation numbers match what we display.
+        # BUT: include multiple relevant excerpts from the same page so we don't miss terms
+        # that appear later in the article.
+        key_terms_for_prompt: list[str] = []
+        if topic_hint:
+            key_terms_for_prompt.extend(extract_keywords(topic_hint, max_terms=6))
+        key_terms_for_prompt.extend(extract_keywords(retrieval_seed, max_terms=10))
+        seen_k: set[str] = set()
+        key_terms_for_prompt = [t for t in key_terms_for_prompt if t and not (t in seen_k or seen_k.add(t))]
 
-    url_to_chunks: dict[str, list] = {}
-    for c in chunks:
-        u = (c.url or "").strip()
-        if not u:
-            continue
-        if prefixes and not u.startswith(tuple(prefixes)):
-            continue
-        url_to_chunks.setdefault(u, []).append(c)
+        prefixes_t = tuple(p for p in (prefixes or []) if p)
+        url_to_chunks: dict[str, list] = {}
+        for c in chunks:
+            u = (getattr(c, "url", "") or "").strip()
+            if not u:
+                continue
+            if prefixes_t and not u.startswith(prefixes_t):
+                continue
+            url_to_chunks.setdefault(u, []).append(c)
 
-    def _chunk_score(text: str) -> int:
-        hay = (text or "").lower()
-        return sum(1 for t in key_terms_for_prompt if t and t.lower() in hay)
+        def _text_score(text: str) -> int:
+            hay = (text or "").lower()
+            return sum(1 for t in key_terms_for_prompt if t and t.lower() in hay)
 
-    # Rank pages by their best matching chunk score.
-    ranked_pairs: list[tuple[str, int]] = []
-    for u, cs in url_to_chunks.items():
-        best = max((_chunk_score((c.text or "")) for c in (cs or [])), default=0)
-        ranked_pairs.append((u, int(best)))
+        def _title_score(title: str | None) -> int:
+            hay = (title or "").lower()
+            return sum(1 for t in key_terms_for_prompt[:6] if t and t.lower() in hay)
 
-    ranked_pairs.sort(key=lambda p: p[1], reverse=True)
-    # If we have at least one relevant page, drop zero-score URLs so we don't cite random pages.
-    nonzero = [u for (u, s) in ranked_pairs if s > 0]
-    ranked_urls = nonzero if nonzero else [u for (u, _s) in ranked_pairs]
+        ranked: list[tuple[str, int, int]] = []
+        for u, cs in url_to_chunks.items():
+            best_text = max((_text_score((getattr(c, "text", "") or "")) for c in (cs or [])), default=0)
+            # Prefer titles that actually look like the topic.
+            best_title = max((_title_score(getattr(c, "title", None)) for c in (cs or [])), default=0)
+            ranked.append((u, int(best_title), int(best_text)))
 
-    prompt_chunks = []
-    for u in ranked_urls[:6]:
-        cs = url_to_chunks.get(u) or []
-        if not cs:
-            continue
+        # Rank by title match first, then content match.
+        ranked.sort(key=lambda p: (p[1], p[2]), reverse=True)
 
-        # Pick a few best chunks from this page.
-        ranked_chunks = sorted(cs, key=lambda c: _chunk_score((c.text or "")), reverse=True)
-        picked = ranked_chunks[:3]
-        merged_text = "\n\n".join(((c.text or "").strip()) for c in picked if (c.text or "").strip())
-        merged_text = merged_text.strip()
+        title_nonzero = [u for (u, ts, _cs) in ranked if ts > 0]
+        if title_nonzero:
+            ranked_urls = title_nonzero
+        else:
+            text_nonzero = [u for (u, _ts, cs) in ranked if cs > 0]
+            ranked_urls = text_nonzero if text_nonzero else [u for (u, _ts, _cs) in ranked]
 
-        # Cap merged context per URL to keep prompts bounded.
-        if len(merged_text) > 2200:
-            merged_text = merged_text[:2200] + "..."
+        prompt_chunks: list = []
+        for u in ranked_urls[:6]:
+            cs = url_to_chunks.get(u) or []
+            if not cs:
+                continue
 
-        prompt_chunks.append(
-            type(cs[0])(
-                text=merged_text or (cs[0].text or ""),
-                url=u,
-                title=cs[0].title,
+            ranked_chunks = sorted(cs, key=lambda c: _text_score((getattr(c, "text", "") or "")), reverse=True)
+            picked = ranked_chunks[:3]
+            merged_text = "\n\n".join(
+                ((getattr(c, "text", "") or "").strip()) for c in picked if (getattr(c, "text", "") or "").strip()
+            ).strip()
+            if len(merged_text) > 2200:
+                merged_text = merged_text[:2200] + "..."
+
+            prompt_chunks.append(
+                type(cs[0])(
+                    text=merged_text or (getattr(cs[0], "text", "") or ""),
+                    url=u,
+                    title=getattr(cs[0], "title", None),
+                )
             )
-        )
+
+        return prompt_chunks
+
+    prompt_chunks = _build_prompt_chunks(
+        chunks=chunks,
+        retrieval_seed=retrieval_seed,
+        topic_hint=topic_hint,
+        prefixes=prefixes,
+    )
 
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
@@ -728,6 +798,111 @@ async def _chat_impl(
 
     actions.append("Composed the reply with citations.")
 
+    # Optional: use a second-pass judge to decide if the answer is well-supported by the retrieved sources.
+    # If the judge is unconvinced, we trigger a live web/wiki fetch and regenerate once.
+    if settings.answer_judge_enabled:
+        try:
+            judge_sources = [
+                {"title": getattr(c, "title", None), "url": getattr(c, "url", "")}
+                for c in (prompt_chunks or [])
+                if getattr(c, "url", None)
+            ][:6]
+            j = judge_answer_confidence(
+                user_message=req.message,
+                answer=res.text or "",
+                sources=judge_sources,
+            )
+            actions.append(
+                f"Judge confidence={j.confidence:.2f}; needs_web_search={bool(j.needs_web_search)}."
+            )
+
+            if j.needs_web_search and j.confidence < float(settings.answer_judge_threshold):
+                await _status("My librarian looks doubtful; fetching better sources...")
+                actions.append("Judge flagged low confidence; forced live retrieval/web search.")
+
+                retry_seed = (topic_hint or req.message).strip()
+                retry_qs = derive_search_queries(retry_seed) or [retry_seed]
+                retry_primary = retry_qs[0]
+
+                # First: try live MediaWiki retrieval.
+                live_chunks = await live_query_chunks(retry_primary, allowed_url_prefixes=prefixes)
+
+                # If still empty, fall back to Google CSE web search.
+                if not live_chunks:
+                    try:
+                        web_chunks, web_hits = await live_search_web_and_fetch_chunks(
+                            retry_primary,
+                            allowed_url_prefixes=prefixes,
+                            max_results=5,
+                            max_chunks_total=8,
+                        )
+                    except Exception:
+                        web_chunks, web_hits = ([], [])
+
+                    web_query = retry_primary
+                    if web_hits:
+                        web_results = [
+                            {
+                                "title": str((r.title or "")[:120]),
+                                "url": str(r.url),
+                                "snippet": (str(r.snippet)[:240] if r.snippet else None),
+                            }
+                            for r in (web_hits or [])
+                            if getattr(r, "url", None)
+                        ][:5]
+
+                    live_chunks = web_chunks
+
+                retry_prompt_chunks = _build_prompt_chunks(
+                    chunks=live_chunks,
+                    retrieval_seed=retry_seed,
+                    topic_hint=topic_hint,
+                    prefixes=prefixes,
+                )
+                if retry_prompt_chunks:
+                    retry_prompt = build_rag_prompt(
+                        user_message=req.message,
+                        conversation_context=conversation_context,
+                        chunks=retry_prompt_chunks,
+                        allowed_url_prefixes=prefixes,
+                    )
+                    res = client.generate(retry_prompt)
+                    prompt_chunks = retry_prompt_chunks
+                    actions.append("Regenerated answer after judge-triggered retrieval.")
+        except Exception:
+            # Judge is best-effort; don't break chat.
+            pass
+
+    # If the model effectively said "I don't know" (including the roleplay variants), do one retry
+    # with a fresh, focused wiki lookup to avoid returning random sources.
+    if _is_low_confidence_answer(res.text or "") or not _has_source_citations(res.text or ""):
+        try:
+            await _status("That answer felt uncertain; double-checking the wiki...")
+            actions.append("Answer looked uncertain; re-queried the wiki for better sources.")
+            retry_seed = (topic_hint or req.message).strip()
+            retry_qs = derive_search_queries(retry_seed) or [retry_seed]
+            retry_primary = retry_qs[0]
+            retry_chunks = await live_query_chunks(retry_primary, allowed_url_prefixes=prefixes)
+            retry_prompt_chunks = _build_prompt_chunks(
+                chunks=retry_chunks,
+                retrieval_seed=retry_seed,
+                topic_hint=topic_hint,
+                prefixes=prefixes,
+            )
+            if retry_prompt_chunks:
+                retry_prompt = build_rag_prompt(
+                    user_message=req.message,
+                    conversation_context=conversation_context,
+                    chunks=retry_prompt_chunks,
+                    allowed_url_prefixes=prefixes,
+                )
+                res = client.generate(retry_prompt)
+                prompt_chunks = retry_prompt_chunks
+                actions.append("Rewrote the answer using refreshed sources.")
+        except Exception:
+            # Retry is best-effort.
+            pass
+
     # Attach a small thumbnail per cited URL (best-effort) so the UI can show relevant images.
     # This is intentionally limited to a few sources to keep latency reasonable.
     url_to_thumb: dict[str, str | None] = {}
@@ -784,8 +959,7 @@ async def _chat_impl(
     # Avoid caching explicit "I can't find it" answers so future runs will re-research.
     if sources:
         try:
-            ans_l = (res.text or "").lower()
-            if not any(p in ans_l for p in ("do not know", "don't know", "no mention", "naught of", "cannot find")):
+            if (not _is_low_confidence_answer(res.text or "")) and _has_source_citations(res.text or ""):
                 AnswerCacheStore().add(
                     question=req.message,
                     answer=res.text,

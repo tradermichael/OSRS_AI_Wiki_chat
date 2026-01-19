@@ -11,12 +11,18 @@ class GeminiResult:
 
 
 class GeminiVertexClient:
-    def __init__(self) -> None:
-        self._model_name = settings.gemini_model
+    def __init__(self, *, model_name: str | None = None) -> None:
+        self._model_name = model_name or settings.gemini_model
         self._project = settings.google_cloud_project
         self._location = settings.vertex_location
 
-    def generate(self, prompt: str) -> GeminiResult:
+    def generate(
+        self,
+        prompt: str,
+        *,
+        temperature: float | None = None,
+        max_output_tokens: int | None = None,
+    ) -> GeminiResult:
         if not self._project:
             raise RuntimeError(
                 "GOOGLE_CLOUD_PROJECT is not set. Configure Vertex AI credentials and set GOOGLE_CLOUD_PROJECT."
@@ -33,11 +39,14 @@ class GeminiVertexClient:
         vertexai.init(project=self._project, location=self._location)
         model = GenerativeModel(self._model_name)
 
+        t = 0.2 if temperature is None else float(temperature)
+        mot = 1024 if max_output_tokens is None else int(max_output_tokens)
+
         response = model.generate_content(
             prompt,
             generation_config={
-                "temperature": 0.2,
-                "max_output_tokens": 1024,
+                "temperature": t,
+                "max_output_tokens": mot,
             },
         )
 
