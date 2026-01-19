@@ -14,6 +14,12 @@ const resumeChatBtn = document.getElementById('resumeChat');
 const voiceToggleBtn = document.getElementById('voiceToggle');
 const voiceStatusEl = document.getElementById('voiceStatus');
 
+const voiceChatToggleBtn = document.getElementById('voiceChatToggle');
+const voiceChatPanelEl = document.getElementById('voiceChatPanel');
+const voiceChatStateEl = document.getElementById('voiceChatState');
+const voiceChatDisconnectBtn = document.getElementById('voiceChatDisconnect');
+const pushToTalkBtn = document.getElementById('pushToTalk');
+
 const wikiPreviewEl = document.getElementById('wikiPreview');
 const wikiPreviewTitleEl = document.getElementById('wikiPreviewTitle');
 const wikiPreviewOpenEl = document.getElementById('wikiPreviewOpen');
@@ -28,6 +34,7 @@ let liveChatSnapshot = null;
 let viewingHistoryId = null;
 
 let voice = null;
+let liveVoice = null;
 
 const SESSION_ID_KEY = 'osrs_session_id';
 const LIVE_CHAT_KEY = 'osrs_live_chat_v1';
@@ -507,8 +514,14 @@ function setComposerEnabled(enabled) {
   if (btn) btn.disabled = !enabled;
 
   if (voiceToggleBtn) voiceToggleBtn.disabled = !enabled;
+  if (voiceChatToggleBtn) voiceChatToggleBtn.disabled = !enabled;
+  if (pushToTalkBtn) pushToTalkBtn.disabled = !enabled;
   if (!enabled && voice && typeof voice.stop === 'function') {
     voice.stop();
+  }
+  if (!enabled && liveVoice && typeof liveVoice.disconnect === 'function') {
+    liveVoice.disconnect();
+    liveVoice = null;
   }
 }
 
@@ -526,6 +539,335 @@ function setVoiceBtnState(listening) {
   const label = on ? 'Stop voice input' : 'Voice input';
   voiceToggleBtn.title = label;
   voiceToggleBtn.setAttribute('aria-label', label);
+}
+
+function setVoiceChatState(text) {
+  if (!voiceChatStateEl) return;
+  voiceChatStateEl.textContent = String(text || '').trim();
+}
+
+function decodeBase64ToBytes(b64) {
+  const bin = atob(String(b64 || ''));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function downsampleFloat32ToInt16(input, inRate, outRate) {
+  if (!input || !input.length) return new Int16Array(0);
+
+  if (!inRate || !outRate || inRate === outRate) {
+    const out = new Int16Array(input.length);
+    for (let i = 0; i < input.length; i++) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      out[i] = s < 0 ? (s * 0x8000) : (s * 0x7fff);
+    }
+    return out;
+  }
+
+  const ratio = inRate / outRate;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Int16Array(outLen);
+  let inputIndex = 0;
+  for (let outIndex = 0; outIndex < outLen; outIndex++) {
+    const next = Math.floor((outIndex + 1) * ratio);
+    let sum = 0;
+    let count = 0;
+    for (; inputIndex < next && inputIndex < input.length; inputIndex++) {
+      sum += input[inputIndex];
+      count++;
+    }
+    const avg = count ? (sum / count) : 0;
+    const s = Math.max(-1, Math.min(1, avg));
+    out[outIndex] = s < 0 ? (s * 0x8000) : (s * 0x7fff);
+  }
+  return out;
+}
+
+function initVoiceChat() {
+  if (!voiceChatToggleBtn || !voiceChatPanelEl || !pushToTalkBtn) return;
+
+  const WS_URL = ((location.protocol === 'https:') ? 'wss://' : 'ws://') + location.host + '/api/live/ws';
+
+  let ws = null;
+  let connecting = false;
+  let talking = false;
+  let inputTx = '';
+
+  let micStream = null;
+  let micCtx = null;
+  let micSource = null;
+  let micProc = null;
+
+  let playCtx = null;
+  let playHead = 0;
+  let playingSources = [];
+
+  let botBubble = null;
+  let botText = '';
+
+  function setPanelOpen(open) {
+    voiceChatPanelEl.hidden = !open;
+    voiceChatToggleBtn.classList.toggle('is-listening', Boolean(open));
+    const label = open ? 'Close voice chat' : 'Voice chat';
+    voiceChatToggleBtn.title = label;
+    voiceChatToggleBtn.setAttribute('aria-label', label);
+  }
+
+  function resetBotTurn() {
+    botBubble = null;
+    botText = '';
+  }
+
+  function stopPlayback() {
+    try {
+      for (const s of playingSources) {
+        try { s.stop(0); } catch { /* ignore */ }
+      }
+    } catch { /* ignore */ }
+    playingSources = [];
+    if (playCtx) playHead = playCtx.currentTime;
+  }
+
+  async function ensurePlayContext() {
+    if (!playCtx) {
+      playCtx = new (window.AudioContext || window.webkitAudioContext)();
+      playHead = playCtx.currentTime;
+    }
+    if (playCtx.state === 'suspended') {
+      try { await playCtx.resume(); } catch { /* ignore */ }
+    }
+  }
+
+  async function connect() {
+    if (ws || connecting) return;
+    connecting = true;
+    setVoiceChatState('Connecting…');
+    pushToTalkBtn.disabled = true;
+
+    ws = new WebSocket(WS_URL);
+    ws.binaryType = 'arraybuffer';
+
+    ws.addEventListener('open', () => {
+      connecting = false;
+      setVoiceChatState('Connected. Hold to talk.');
+      pushToTalkBtn.disabled = false;
+      if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = false;
+      try { ws.send(JSON.stringify({ type: 'start' })); } catch { /* ignore */ }
+    });
+
+    ws.addEventListener('message', async (evt) => {
+      let msg = null;
+      try { msg = JSON.parse(evt.data); } catch { return; }
+      if (!msg || !msg.type) return;
+
+      if (msg.type === 'ready') {
+        setVoiceChatState('Connected. Hold to talk.');
+        return;
+      }
+
+      if (msg.type === 'error') {
+        setVoiceChatState(msg.detail || 'Voice chat error');
+        return;
+      }
+
+      if (msg.type === 'interrupted') {
+        stopPlayback();
+        resetBotTurn();
+        return;
+      }
+
+      if (msg.type === 'input_transcript') {
+        if (msg.text) inputTx = String(msg.text);
+        if (msg.finished && inputTx) {
+          addMessage('me', 'You (voice)', inputTx);
+          inputTx = '';
+        }
+        return;
+      }
+
+      if (msg.type === 'output_transcript') {
+        const t = (msg.text != null) ? String(msg.text) : '';
+        if (!t) return;
+        if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
+        // Treat transcript as authoritative text for the spoken response.
+        botText = t;
+        botBubble.querySelector('.text').textContent = botText;
+        return;
+      }
+
+      if (msg.type === 'model_text') {
+        const t = (msg.text != null) ? String(msg.text) : '';
+        if (!t) return;
+        if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
+        botText += t;
+        botBubble.querySelector('.text').textContent = botText;
+        return;
+      }
+
+      if (msg.type === 'audio') {
+        const b = decodeBase64ToBytes(msg.data);
+        if (!b || !b.length) return;
+
+        // Expect raw PCM16LE @ 24kHz (per Live API specs). Try to parse rate= from mime.
+        const mime = String(msg.mime || 'audio/pcm;rate=24000').toLowerCase();
+        let rate = 24000;
+        const m = mime.match(/rate=(\d+)/);
+        if (m) rate = parseInt(m[1], 10) || 24000;
+
+        await ensurePlayContext();
+
+        const pcm16 = new Int16Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 2));
+        const floats = new Float32Array(pcm16.length);
+        for (let i = 0; i < pcm16.length; i++) floats[i] = pcm16[i] / 0x8000;
+
+        const audioBuffer = playCtx.createBuffer(1, floats.length, rate);
+        audioBuffer.copyToChannel(floats, 0);
+
+        const src = playCtx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(playCtx.destination);
+
+        const now = playCtx.currentTime;
+        if (!playHead || playHead < now) playHead = now;
+        src.start(playHead);
+        playHead += audioBuffer.duration;
+        playingSources.push(src);
+        src.addEventListener('ended', () => {
+          playingSources = playingSources.filter((x) => x !== src);
+        });
+        return;
+      }
+
+      if (msg.type === 'turn_complete') {
+        resetBotTurn();
+      }
+    });
+
+    ws.addEventListener('close', () => {
+      ws = null;
+      connecting = false;
+      talking = false;
+      pushToTalkBtn.disabled = true;
+      pushToTalkBtn.classList.remove('is-talking');
+      pushToTalkBtn.textContent = 'Hold to talk';
+      setVoiceChatState('Disconnected.');
+      if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = true;
+      stopPlayback();
+      resetBotTurn();
+      cleanupMic();
+    });
+
+    ws.addEventListener('error', () => {
+      setVoiceChatState('Voice chat connection error.');
+    });
+  }
+
+  function disconnect() {
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'close' }));
+    } catch { /* ignore */ }
+    try { if (ws) ws.close(); } catch { /* ignore */ }
+  }
+
+  async function setupMicIfNeeded() {
+    if (micStream && micCtx && micProc && micSource) return;
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    micCtx = new (window.AudioContext || window.webkitAudioContext)();
+    micSource = micCtx.createMediaStreamSource(micStream);
+
+    // ScriptProcessorNode is deprecated but broadly supported and sufficient here.
+    micProc = micCtx.createScriptProcessor(2048, 1, 1);
+    micProc.onaudioprocess = (e) => {
+      if (!talking) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const ch0 = e.inputBuffer.getChannelData(0);
+      const pcm = downsampleFloat32ToInt16(ch0, micCtx.sampleRate, 16000);
+      if (!pcm || !pcm.length) return;
+      try {
+        ws.send(pcm.buffer);
+      } catch {
+        // ignore
+      }
+    };
+
+    micSource.connect(micProc);
+    // Avoid feedback; ScriptProcessor needs to be connected to destination to run in some browsers.
+    micProc.connect(micCtx.destination);
+  }
+
+  function cleanupMic() {
+    try { if (micProc) micProc.disconnect(); } catch { /* ignore */ }
+    try { if (micSource) micSource.disconnect(); } catch { /* ignore */ }
+    try {
+      if (micStream) micStream.getTracks().forEach((t) => t.stop());
+    } catch { /* ignore */ }
+    try { if (micCtx) micCtx.close(); } catch { /* ignore */ }
+    micProc = null;
+    micSource = null;
+    micStream = null;
+    micCtx = null;
+  }
+
+  function startTalking() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (talking) return;
+    talking = true;
+    pushToTalkBtn.classList.add('is-talking');
+    pushToTalkBtn.textContent = 'Release to send';
+  }
+
+  function stopTalking() {
+    if (!talking) return;
+    talking = false;
+    pushToTalkBtn.classList.remove('is-talking');
+    pushToTalkBtn.textContent = 'Hold to talk';
+    try {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'audio_stream_end' }));
+    } catch { /* ignore */ }
+  }
+
+  voiceChatToggleBtn.addEventListener('click', async () => {
+    const open = voiceChatPanelEl.hidden;
+    setPanelOpen(open);
+    if (open) {
+      await connect();
+      liveVoice = { disconnect };
+    } else {
+      disconnect();
+      liveVoice = null;
+    }
+  });
+
+  if (voiceChatDisconnectBtn) {
+    voiceChatDisconnectBtn.addEventListener('click', () => disconnect());
+  }
+
+  const startEvt = async (e) => {
+    e.preventDefault();
+    if (input && input.disabled) return;
+    await connect();
+    try { await setupMicIfNeeded(); } catch {
+      setVoiceChatState('Microphone permission denied.');
+      return;
+    }
+    startTalking();
+  };
+
+  const stopEvt = (e) => {
+    e.preventDefault();
+    stopTalking();
+  };
+
+  pushToTalkBtn.addEventListener('mousedown', startEvt);
+  pushToTalkBtn.addEventListener('touchstart', startEvt, { passive: false });
+  window.addEventListener('mouseup', stopEvt);
+  window.addEventListener('touchend', stopEvt, { passive: false });
+
+  // Default UI state.
+  setPanelOpen(false);
+  setVoiceChatState('Voice chat is off.');
+  pushToTalkBtn.textContent = 'Hold to talk';
 }
 
 function initVoiceInput() {
@@ -592,7 +934,13 @@ function initVoiceInput() {
           const mime = (mediaRecorder && mediaRecorder.mimeType) ? mediaRecorder.mimeType : 'audio/webm';
           const blob = new Blob(chunks, { type: mime });
           const form = new FormData();
-          form.append('file', blob, 'voice.webm');
+          let ext = 'webm';
+          const ml = String(mime || '').toLowerCase();
+          if (ml.includes('ogg')) ext = 'ogg';
+          else if (ml.includes('wav')) ext = 'wav';
+          else if (ml.includes('mpeg') || ml.includes('mp3')) ext = 'mp3';
+          else if (ml.includes('mp4')) ext = 'mp4';
+          form.append('file', blob, `voice.${ext}`);
 
           const r = await fetch('/api/speech/transcribe', { method: 'POST', body: form });
           if (!r.ok) {
@@ -1062,6 +1410,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
   setFullscreenBtnState();
   initVoiceInput();
+  initVoiceChat();
   loadHistory();
 });
 

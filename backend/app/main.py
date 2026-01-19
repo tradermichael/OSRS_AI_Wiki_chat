@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
 import json
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi import File, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -160,6 +162,7 @@ async def speech_transcribe(
         "audio/wav",
         "audio/x-wav",
         "audio/mpeg",
+        "audio/mp4",
     }:
         raise HTTPException(status_code=400, detail=f"Unsupported audio type: {file.content_type!r}")
 
@@ -213,6 +216,195 @@ async def speech_transcribe(
     text = " ".join(parts).strip()
 
     return SpeechTranscribeResponse(text=text)
+
+
+@app.websocket("/api/live/ws")
+async def gemini_live_websocket(ws: WebSocket):
+    """Realtime voice chat proxy for Gemini Live API.
+
+    Gemini Live is designed for server-to-server auth, so the browser connects here,
+    and this server holds the authenticated Live API session.
+
+    Protocol (browser <-> server):
+    - First message: JSON text {"type":"start", "systemInstruction"?: str, "voiceName"?: str}
+    - Audio frames: raw bytes (PCM16LE @ 16kHz) sent as binary websocket messages
+    - Control: JSON text {"type":"audio_stream_end"} to flush/trigger response
+    """
+
+    await ws.accept()
+
+    if not bool(getattr(settings, "gemini_live_enabled", False)):
+        await ws.send_json({"type": "error", "detail": "Gemini Live is disabled (set GEMINI_LIVE_ENABLED=true)."})
+        await ws.close(code=1008)
+        return
+
+    try:
+        from google import genai
+        from google.genai import types
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": f"google-genai not installed: {exc}"})
+        await ws.close(code=1011)
+        return
+
+    project = settings.google_cloud_project
+    location = (getattr(settings, "gemini_live_location", None) or "global").strip() or "global"
+    model = (getattr(settings, "gemini_live_model", None) or "gemini-live-2.5-flash-native-audio").strip()
+    default_voice = getattr(settings, "gemini_live_voice_name", None)
+
+    if not project:
+        await ws.send_json({"type": "error", "detail": "GOOGLE_CLOUD_PROJECT is required for Gemini Live."})
+        await ws.close(code=1008)
+        return
+
+    try:
+        start_raw = await ws.receive_text()
+        start_msg = json.loads(start_raw)
+    except Exception:
+        await ws.send_json({"type": "error", "detail": "Expected initial JSON start message."})
+        await ws.close(code=1003)
+        return
+
+    if (start_msg.get("type") or "start") != "start":
+        await ws.send_json({"type": "error", "detail": "First message must be {type:'start', ...}."})
+        await ws.close(code=1003)
+        return
+
+    system_instruction = (start_msg.get("systemInstruction") or "").strip() or (
+        "You are Wise Old AI, an Old School RuneScape helper. "
+        "Speak clearly and conversationally. Keep answers practical and correct."
+    )
+
+    voice_name = (start_msg.get("voiceName") or default_voice or "").strip() or None
+
+    # Configure session.
+    speech_config = None
+    if voice_name:
+        speech_config = types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
+            )
+        )
+
+    connect_config = types.LiveConnectConfig(
+        response_modalities=[types.Modality.AUDIO, types.Modality.TEXT],
+        system_instruction=system_instruction,
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        speech_config=speech_config,
+    )
+
+    # Create client and connect.
+    client = genai.Client(
+        vertexai=True,
+        project=project,
+        location=location,
+        http_options=types.HttpOptions(api_version="v1beta1"),
+    )
+
+    async def _send_server_content(server_content: object) -> None:
+        # server_content is a types.LiveServerContent.
+        interrupted = bool(getattr(server_content, "interrupted", False))
+        if interrupted:
+            await ws.send_json({"type": "interrupted"})
+
+        input_tx = getattr(server_content, "input_transcription", None)
+        if input_tx and getattr(input_tx, "text", None):
+            await ws.send_json(
+                {
+                    "type": "input_transcript",
+                    "text": input_tx.text,
+                    "finished": bool(getattr(input_tx, "finished", False)),
+                }
+            )
+
+        output_tx = getattr(server_content, "output_transcription", None)
+        if output_tx and getattr(output_tx, "text", None):
+            await ws.send_json(
+                {
+                    "type": "output_transcript",
+                    "text": output_tx.text,
+                    "finished": bool(getattr(output_tx, "finished", False)),
+                }
+            )
+
+        model_turn = getattr(server_content, "model_turn", None)
+        if model_turn:
+            parts = getattr(model_turn, "parts", None) or []
+            for part in parts:
+                text = getattr(part, "text", None)
+                if text:
+                    await ws.send_json({"type": "model_text", "text": text})
+
+                inline = getattr(part, "inline_data", None)
+                if inline and getattr(inline, "data", None) and getattr(inline, "mime_type", None):
+                    mime = str(inline.mime_type)
+                    if mime.startswith("audio/"):
+                        b64 = base64.b64encode(inline.data).decode("ascii")
+                        await ws.send_json({"type": "audio", "mime": mime, "data": b64})
+
+        if bool(getattr(server_content, "turn_complete", False)):
+            await ws.send_json({"type": "turn_complete"})
+
+    async def _pump_from_gemini(session) -> None:
+        async for message in session.receive():
+            sc = getattr(message, "server_content", None)
+            if sc is not None:
+                await _send_server_content(sc)
+
+            # Some SDK versions expose a convenience text field.
+            msg_text = getattr(message, "text", None)
+            if msg_text:
+                await ws.send_json({"type": "model_text", "text": msg_text})
+
+    try:
+        async with client.aio.live.connect(model=model, config=connect_config) as session:
+            await ws.send_json({"type": "ready", "model": model, "location": location})
+
+            pump_task = asyncio.create_task(_pump_from_gemini(session))
+            try:
+                while True:
+                    incoming = await ws.receive()
+
+                    if incoming.get("type") == "websocket.disconnect":
+                        break
+
+                    if incoming.get("bytes") is not None:
+                        audio_bytes = incoming["bytes"]
+                        if audio_bytes:
+                            await session.send_realtime_input(
+                                audio={"mime_type": "audio/pcm;rate=16000", "data": audio_bytes}
+                            )
+                        continue
+
+                    text_payload = incoming.get("text")
+                    if not text_payload:
+                        continue
+                    try:
+                        evt = json.loads(text_payload)
+                    except Exception:
+                        continue
+
+                    evt_type = (evt.get("type") or "").strip()
+                    if evt_type == "audio_stream_end":
+                        await session.send_realtime_input(audio_stream_end=True)
+                    elif evt_type == "text":
+                        t = (evt.get("text") or "").strip()
+                        if t:
+                            await session.send_client_content(
+                                turns=types.Content(role="user", parts=[types.Part(text=t)]),
+                                turn_complete=True,
+                            )
+                    elif evt_type == "close":
+                        break
+            finally:
+                pump_task.cancel()
+                with contextlib.suppress(Exception):
+                    await pump_task
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        await ws.send_json({"type": "error", "detail": str(exc)})
+        await ws.close(code=1011)
 
 
 @app.get("/api/gold/total", response_model=GoldTotalResponse)

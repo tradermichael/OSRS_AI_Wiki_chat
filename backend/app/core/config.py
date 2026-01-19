@@ -84,6 +84,13 @@ class Settings(BaseSettings):
     gcp_speech_language: str = "en-US"
     gcp_speech_max_bytes: int = 3_000_000
 
+    # Optional: Gemini Live API (realtime voice)
+    # Uses server-side authentication (ADC). Client should connect via our backend.
+    gemini_live_enabled: bool = True
+    gemini_live_location: str = "global"
+    gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
+    gemini_live_voice_name: str = "Orus"
+
     # Path to RAG sources configuration JSON (repo root defaults to rag_sources.json).
     rag_sources_path: str | None = None
 
