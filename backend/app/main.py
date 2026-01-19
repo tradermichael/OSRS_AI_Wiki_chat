@@ -235,7 +235,8 @@ async def gemini_live_websocket(ws: WebSocket):
 
     if not bool(getattr(settings, "gemini_live_enabled", False)):
         await ws.send_json({"type": "error", "detail": "Gemini Live is disabled (set GEMINI_LIVE_ENABLED=true)."})
-        await ws.close(code=1008)
+        # 1008 shows as "policy violation" in browsers, which is confusing for a config flag.
+        await ws.close(code=1011)
         return
 
     try:
@@ -253,7 +254,21 @@ async def gemini_live_websocket(ws: WebSocket):
 
     if not project:
         await ws.send_json({"type": "error", "detail": "GOOGLE_CLOUD_PROJECT is required for Gemini Live."})
-        await ws.close(code=1008)
+        await ws.close(code=1011)
+        return
+
+    # Guard against a common misconfiguration: truncated model names.
+    # The intended model is e.g. "gemini-live-2.5-flash-native-audio".
+    if model in {"gemini-live-2.5-flash-native-a", "gemini-live-2.5-flash-native"} or model.endswith("-native-a"):
+        await ws.send_json(
+            {
+                "type": "error",
+                "detail": (
+                    f"Invalid GEMINI_LIVE_MODEL '{model}'. Did you mean 'gemini-live-2.5-flash-native-audio'?"
+                ),
+            }
+        )
+        await ws.close(code=1011)
         return
 
     try:
@@ -403,7 +418,14 @@ async def gemini_live_websocket(ws: WebSocket):
     except WebSocketDisconnect:
         return
     except Exception as exc:
-        await ws.send_json({"type": "error", "detail": str(exc)})
+        await ws.send_json(
+            {
+                "type": "error",
+                "detail": str(exc),
+                "model": model,
+                "location": location,
+            }
+        )
         await ws.close(code=1011)
 
 

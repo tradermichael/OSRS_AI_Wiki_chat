@@ -656,9 +656,10 @@ function initVoiceChat() {
 
     ws.addEventListener('open', () => {
       connecting = false;
-      // Wait for server 'ready' before enabling audio streaming.
       setVoiceChatState('Connected. Starting session…');
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = false;
+      pushToTalkBtn.textContent = 'Hold to talk (release to get reply)';
+      // Start the Live session.
       try { ws.send(JSON.stringify({ type: 'start' })); } catch { /* ignore */ }
     });
 
@@ -699,7 +700,6 @@ function initVoiceChat() {
         const t = (msg.text != null) ? String(msg.text) : '';
         if (!t) return;
         if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
-        // Treat transcript as authoritative text for the spoken response.
         botText = t;
         botBubble.querySelector('.text').textContent = botText;
         return;
@@ -718,7 +718,6 @@ function initVoiceChat() {
         const b = decodeBase64ToBytes(msg.data);
         if (!b || !b.length) return;
 
-        // Expect raw PCM16LE @ 24kHz (per Live API specs). Try to parse rate= from mime.
         const mime = String(msg.mime || 'audio/pcm;rate=24000').toLowerCase();
         let rate = 24000;
         const m = mime.match(/rate=(\d+)/);
@@ -760,21 +759,16 @@ function initVoiceChat() {
       liveReady = false;
       pushToTalkBtn.disabled = true;
       pushToTalkBtn.classList.remove('is-talking');
-      pushToTalkBtn.textContent = 'Hold to talk';
-      const code = evt && typeof evt.code === 'number' ? evt.code : null;
-      const reason = evt && evt.reason ? String(evt.reason) : '';
-      let msg = lastWsError ? `Disconnected: ${lastWsError}` : 'Disconnected.';
+
+      const code = (evt && typeof evt.code === 'number') ? evt.code : null;
+      const reason = (evt && evt.reason) ? String(evt.reason).trim() : '';
+      let status = lastWsError ? `Disconnected: ${lastWsError}` : 'Disconnected.';
       if (!lastWsError && code) {
-        if (code === 1008) {
-          msg = 'Disconnected (1008 policy). Check GOOGLE_CLOUD_PROJECT + server ADC credentials.';
-        } else if (code === 1003) {
-          msg = 'Disconnected (1003). Protocol error (start message / audio order).';
-        } else {
-          msg = `Disconnected (${code}).`;
-        }
+        status = `Disconnected (${code})`;
+        if (reason) status += `: ${reason}`;
       }
-      if (reason && !lastWsError) msg += ` ${reason}`;
-      setVoiceChatState(msg);
+      setVoiceChatState(status);
+
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = true;
       stopPlayback();
       resetBotTurn();
@@ -975,7 +969,7 @@ function initVoiceChat() {
   // Default UI state.
   setPanelOpen(false);
   setVoiceChatState('Voice chat is off.');
-  pushToTalkBtn.textContent = 'Hold to talk';
+  pushToTalkBtn.textContent = 'Hold to talk (release to get reply)';
 }
 
 function initVoiceInput() {
@@ -1511,6 +1505,7 @@ if (messagesEl) {
 
 // Load initial history once the page is ready.
 document.addEventListener('DOMContentLoaded', () => {
+  initMobileViewportSizing();
   // Sidebar toggle state
   const open = localStorage.getItem(HISTORY_SIDEBAR_KEY);
   // Hide public chat log by default unless user explicitly opened it.
@@ -1525,6 +1520,40 @@ document.addEventListener('DOMContentLoaded', () => {
   initVoiceChat();
   loadHistory();
 });
+
+function initMobileViewportSizing() {
+  // On mobile browsers/PWAs, the on-screen keyboard shrinks the *visual* viewport,
+  // but CSS 100vh/100dvh can still behave like the layout viewport.
+  // We track VisualViewport.height and expose it as --vvh so the composer stays visible.
+  const root = document.documentElement;
+  if (!root) return;
+  if (!window.visualViewport) return;
+
+  const vv = window.visualViewport;
+  const update = () => {
+    const h = Math.max(1, Math.floor(vv.height));
+    root.style.setProperty('--vvh', `${h}px`);
+  };
+
+  vv.addEventListener('resize', update);
+  vv.addEventListener('scroll', update);
+  window.addEventListener('orientationchange', () => setTimeout(update, 200));
+  update();
+
+  // Best-effort: when focusing the input, nudge it into view.
+  const msgInput = document.getElementById('message');
+  if (msgInput) {
+    msgInput.addEventListener('focus', () => {
+      setTimeout(() => {
+        try {
+          msgInput.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        } catch {
+          // ignore
+        }
+      }, 250);
+    });
+  }
+}
 
 if (fullscreenToggleBtn) {
   setFullscreenBtnState();
