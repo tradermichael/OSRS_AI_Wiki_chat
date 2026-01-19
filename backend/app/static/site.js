@@ -13,6 +13,21 @@ async function refreshGoldTotal() {
   }
 }
 
+async function incrementVisitsTotal() {
+  const el = document.getElementById('visitsTotal');
+  if (!el) return;
+
+  try {
+    const r = await fetch('/api/visits/increment', { method: 'POST' });
+    if (!r.ok) return;
+    const data = await r.json();
+    const n = Number(data.total_visits || 0);
+    el.textContent = n.toLocaleString();
+  } catch {
+    // ignore
+  }
+}
+
 async function donateGold(amountGold) {
   const r = await fetch('/api/gold/donate', {
     method: 'POST',
@@ -32,7 +47,9 @@ async function donateGold(amountGold) {
 
 window.refreshGoldTotal = refreshGoldTotal;
 window.donateGold = donateGold;
+window.incrementVisitsTotal = incrementVisitsTotal;
 
 document.addEventListener('DOMContentLoaded', () => {
   refreshGoldTotal();
+  incrementVisitsTotal();
 });

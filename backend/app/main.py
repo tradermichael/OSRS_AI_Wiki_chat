@@ -17,6 +17,7 @@ from .history.store import get_public_chat_store
 from .llm.gemini_vertex import GeminiVertexClient
 from .llm.answer_judge import judge_answer_confidence
 from .payments.paypal import PayPalClient
+from .visits.store import get_visits_store
 from .rag.answer_cache import AnswerCacheStore
 from .rag.live_query import live_query_chunks, live_search_web_and_fetch_chunks, live_search_web_and_scrape_chunks
 from .rag.prompting import build_rag_prompt
@@ -35,6 +36,7 @@ from .schemas import (
     CreatePayPalOrderResponse,
     GoldDonateRequest,
     GoldTotalResponse,
+    VisitsTotalResponse,
     FeedbackRequest,
     FeedbackResponse,
     WikiPreviewResponse,
@@ -145,6 +147,22 @@ def gold_donate(req: GoldDonateRequest):
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return GoldTotalResponse(total_gold=total)
+
+
+@app.get("/api/visits/total", response_model=VisitsTotalResponse)
+def visits_total():
+    store = get_visits_store()
+    return VisitsTotalResponse(total_visits=store.get_total())
+
+
+@app.post("/api/visits/increment", response_model=VisitsTotalResponse)
+def visits_increment():
+    store = get_visits_store()
+    try:
+        total = store.increment(1)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return VisitsTotalResponse(total_visits=total)
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -955,16 +973,25 @@ async def _chat_impl(
         if settings.web_scrape_enabled:
             await _status("Listening for tavern gossip (community sources)...")
 
+            if not settings.google_cse_api_key or not (settings.google_cse_community_cx or settings.google_cse_cx):
+                actions.append(
+                    "Google CSE is not configured; can't pull Reddit/community leads (set GOOGLE_CSE_API_KEY and a CX)."
+                )
+
             def _build_community_queries(seed: str) -> list[str]:
                 base = (seed or "").strip()
                 if not base:
                     return []
                 # Bias toward community discussion where consensus/"most people" answers live.
                 candidates = [
-                    f"osrs {base} reddit",
+                    # Reddit-first: force domain/r first so we don't waste budget on generic wiki pages.
                     f"{base} site:reddit.com/r/2007scape",
+                    f"osrs {base} site:reddit.com/r/2007scape",
                     f"{base} site:reddit.com osrs",
+                    f"osrs {base} reddit",
+                    # Secondary community sources
                     f"osrs {base} forum",
+                    f"osrs {base} discord",
                 ]
                 # De-dupe while preserving order.
                 seen_q: set[str] = set()
@@ -983,10 +1010,12 @@ async def _chat_impl(
                 used_query = ""
 
                 seed = (raw_user_message or user_message or retrieval_seed)
-                for q in _build_community_queries(seed)[:3]:
+                tried_queries: list[str] = []
+                for q in _build_community_queries(seed)[:5]:
+                    tried_queries.append(q)
                     sc, hits = await live_search_web_and_scrape_chunks(
                         q,
-                        max_results=5,
+                        max_results=8,
                         max_pages=int(settings.web_scrape_max_pages),
                         max_chunks_total=int(settings.web_scrape_max_chunks_total),
                         skip_url_prefixes=prefixes,
@@ -1003,6 +1032,14 @@ async def _chat_impl(
             except Exception:
                 scraped_chunks, web_hits = ([], [])
                 used_query = ""
+
+            if not web_hits:
+                # If the user's CX is site-restricted to wiki-only, Reddit will never appear.
+                cx_used = settings.google_cse_community_cx or settings.google_cse_cx
+                if cx_used:
+                    actions.append(
+                        "Google CSE returned 0 community leads (if your CX is wiki-restricted, add Reddit sites or set GOOGLE_CSE_COMMUNITY_CX)."
+                    )
 
             if web_hits:
                 web_query = used_query or _primary_live_query(

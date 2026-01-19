@@ -442,7 +442,7 @@ async def live_search_web_and_scrape_chunks(
     """
 
     api_key = settings.google_cse_api_key
-    cx = settings.google_cse_cx
+    cx = settings.google_cse_community_cx or settings.google_cse_cx
     if not api_key or not cx:
         return ([], [])
 

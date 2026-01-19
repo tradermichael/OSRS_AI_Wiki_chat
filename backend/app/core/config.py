@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     google_cse_api_key: str | None = None
     google_cse_cx: str | None = None
 
+    # Optional: a second CX for community/web (e.g., Reddit) searches.
+    # Useful when your primary CX is site-restricted to wiki domains.
+    google_cse_community_cx: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_CSE_COMMUNITY_CX", "GOOGLE_CSE_WEB_CX"),
+    )
+
     # Optional: scrape non-wiki pages returned by Google CSE.
     # This is "untrusted web" retrieval and may include ads/opinions; keep it off by default.
     web_scrape_enabled: bool = True
@@ -94,6 +101,15 @@ class Settings(BaseSettings):
     # Firestore site-state storage (used for global gold total).
     firestore_site_collection: str = "site_state"
     firestore_gold_doc: str = "gold_total"
+
+    # Site visit counter. Defaults to RAG_DB_PATH if not set.
+    visits_db_path: str | None = None
+
+    # Visit counter persistence backend.
+    # sqlite: local file (ephemeral on Cloud Run)
+    # firestore: persistent in GCP Firestore
+    visits_backend: str = Field(default_factory=_default_persistence_backend)  # sqlite|firestore
+    firestore_visits_doc: str = "visits_total"
 
     paypal_env: str = "sandbox"  # sandbox|live
     paypal_client_id: str | None = None

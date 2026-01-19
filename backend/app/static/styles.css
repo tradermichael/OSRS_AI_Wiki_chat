@@ -276,6 +276,20 @@ body {
   white-space: nowrap;
 }
 
+.visits-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(10, 12, 16, 0.35);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.35);
+  color: var(--text);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .gold-coin {
   width: 16px;
   height: 16px;

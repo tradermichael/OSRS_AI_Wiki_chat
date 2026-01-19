@@ -19,6 +19,10 @@ GEMINI_MODEL=gemini-2.5-flash
 GOOGLE_CSE_API_KEY=
 GOOGLE_CSE_CX=
 
+# Optional: separate CX for community/web searches (Reddit, forums).
+# Useful if GOOGLE_CSE_CX is restricted to wiki domains.
+GOOGLE_CSE_COMMUNITY_CX=
+
 # Optional: scrape non-wiki CSE results (untrusted web). Off by default.
 WEB_SCRAPE_ENABLED=false
 WEB_SCRAPE_MAX_PAGES=3
@@ -46,6 +50,11 @@ GOLD_BACKEND=firestore
 # Optional overrides:
 # FIRESTORE_SITE_COLLECTION=site_state
 # FIRESTORE_GOLD_DOC=gold_total
+
+# Visits counter persistence
+VISITS_BACKEND=firestore
+# Optional override:
+# FIRESTORE_VISITS_DOC=visits_total
 
 # NOTE:
 # - The app reads GOOGLE_CLOUD_PROJECT at runtime. The deploy workflow maps the GitHub

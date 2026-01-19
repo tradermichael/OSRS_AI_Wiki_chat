@@ -64,6 +64,10 @@ class GoldTotalResponse(BaseModel):
     total_gold: int
 
 
+class VisitsTotalResponse(BaseModel):
+    total_visits: int
+
+
 class PublicHistoryItem(BaseModel):
     id: str
     created_at: str
