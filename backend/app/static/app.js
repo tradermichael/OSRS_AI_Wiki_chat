@@ -6,6 +6,7 @@ const refreshHistoryBtn = document.getElementById('refreshHistory');
 const toggleHistoryBtn = document.getElementById('toggleHistory');
 const fullscreenToggleBtn = document.getElementById('fullscreenToggle');
 const appLayoutEl = document.querySelector('.app-layout');
+const chatEl = document.querySelector('main.chat');
 const viewBannerEl = document.getElementById('viewBanner');
 const viewBannerTextEl = document.getElementById('viewBannerText');
 const resumeChatBtn = document.getElementById('resumeChat');
@@ -29,6 +30,11 @@ const HISTORY_SIDEBAR_KEY = 'osrs_history_sidebar_open';
 
 function isFullscreen() {
   return Boolean(document.fullscreenElement);
+}
+
+function getFullscreenTargetEl() {
+  // Prefer fullscreening the chat interface only (not the whole page).
+  return chatEl || appLayoutEl || document.documentElement;
 }
 
 function setFullscreenBtnState() {
@@ -729,8 +735,11 @@ if (fullscreenToggleBtn) {
       if (isFullscreen()) {
         await document.exitFullscreen();
       } else {
-        // Fullscreen the whole document so the chat layout has maximum room.
-        await document.documentElement.requestFullscreen();
+        // Fullscreen the chat interface (not the entire page UI).
+        const target = getFullscreenTargetEl();
+        if (target && target.requestFullscreen) {
+          await target.requestFullscreen();
+        }
       }
     } catch {
       // ignore

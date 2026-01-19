@@ -53,6 +53,17 @@ _STOPWORDS = {
     "with",
     "you",
     "your",
+
+    # Domain-generic terms that otherwise cause false cache hits.
+    "osrs",
+    "runescape",
+    "runescape3",
+    "rs",
+    "quest",
+    "quests",
+    "wiki",
+    "guide",
+    "walkthrough",
 }
 
 
@@ -226,8 +237,16 @@ class AnswerCacheStore:
                 return None
 
         q_keys = _keywords(question)
-        if len(q_keys) < 2:
+        # Short questions are often ambiguous and can incorrectly match via generic overlaps.
+        if len(q_keys) < 4:
             return None
+
+        # For short queries, require a stronger match.
+        dynamic_min_score = float(min_score)
+        dynamic_min_intersection = 2
+        if len(q_keys) <= 6:
+            dynamic_min_score = max(dynamic_min_score, 0.65)
+            dynamic_min_intersection = 3
 
         best_item: CachedAnswer | None = None
         best_score = -1.0
@@ -237,7 +256,7 @@ class AnswerCacheStore:
             if not it_keys:
                 continue
             inter = len(q_keys & it_keys)
-            if inter < 2:
+            if inter < dynamic_min_intersection:
                 continue
             union = len(q_keys | it_keys)
             score = (inter / union) if union else 0.0
@@ -245,6 +264,6 @@ class AnswerCacheStore:
                 best_score = score
                 best_item = it
 
-        if not best_item or best_score < float(min_score):
+        if not best_item or best_score < float(dynamic_min_score):
             return None
         return best_item

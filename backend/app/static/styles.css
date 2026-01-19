@@ -314,6 +314,22 @@ body {
     inset 0 0 0 1px rgba(0, 0, 0, 0.22),
     0 18px 40px var(--shadow);
   color: var(--chat-ink);
+
+  /* Allows the messages pane to grow/shrink cleanly, especially in fullscreen. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* Fullscreen should apply to the chat interface itself, not the whole page. */
+.chat:fullscreen,
+.chat:-webkit-full-screen {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  border-radius: 0;
+  padding: 18px;
 }
 
 .messages {
@@ -334,6 +350,13 @@ body {
       rgba(255, 255, 255, 0) 1px,
       rgba(255, 255, 255, 0) 4px
     );
+}
+
+.chat:fullscreen .messages,
+.chat:-webkit-full-screen .messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
 }
 
 /* Scrollbar styling (best-effort) */

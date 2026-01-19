@@ -228,6 +228,35 @@ async def _chat_impl(
         padded = f" {m} "
         return any(p in padded for p in pronouns)
 
+    def _looks_like_opinion_or_community_question(message: str) -> bool:
+        m = (message or "").strip().lower()
+        if not m:
+            return False
+        # Community / subjective questions usually benefit from wider-web sources.
+        needles = (
+            "hardest",
+            "most difficult",
+            "easiest",
+            "best",
+            "worst",
+            "most annoying",
+            "most fun",
+            "favorite",
+            "favourite",
+            "overrated",
+            "underrated",
+            "tier list",
+            "community",
+            "people say",
+            "reddit",
+            "what does reddit",
+            "what does the community",
+            "what do people think",
+            "opinions",
+            "opinion",
+        )
+        return any(n in m for n in needles)
+
     def _topic_hint_from_text(text: str) -> str:
         t = (text or "").strip()
         if not t:
@@ -501,6 +530,12 @@ async def _chat_impl(
         # Avoid serving the same cached answer; user explicitly asked for more.
         force_fresh = True
 
+    opinion_question = _looks_like_opinion_or_community_question(user_message)
+    if opinion_question:
+        # Cached answers tend to overfit generic overlaps (e.g., "quest") on opinion prompts.
+        force_fresh = True
+        actions.append("Opinion/community question detected; favored fresh sources.")
+
     # Context-dependent follow-ups ("her", "that", "it") should not be served from cache.
     if pronoun_followup:
         force_fresh = True
@@ -751,6 +786,41 @@ async def _chat_impl(
                         chunks = scraped_chunks
             else:
                 actions.append("Web search returned no usable leads (check CSE keys and site restriction).")
+
+    # Even if we have wiki chunks, opinion/community questions benefit from wider web sources (Reddit, forums).
+    if opinion_question:
+        if settings.web_scrape_enabled:
+            await _status("Listening for tavern gossip (community sources)...")
+            try:
+                scraped_chunks, web_hits = await live_search_web_and_scrape_chunks(
+                    (queries[0] if queries else retrieval_seed),
+                    max_results=5,
+                    max_pages=int(settings.web_scrape_max_pages),
+                    max_chunks_total=int(settings.web_scrape_max_chunks_total),
+                    skip_url_prefixes=prefixes,
+                )
+            except Exception:
+                scraped_chunks, web_hits = ([], [])
+
+            if web_hits:
+                web_query = (queries[0] if queries else retrieval_seed)
+                web_results = [
+                    {
+                        "title": str((r.title or "")[:120]),
+                        "url": str(r.url),
+                        "snippet": (str(r.snippet)[:240] if r.snippet else None),
+                    }
+                    for r in (web_hits or [])
+                    if getattr(r, "url", None)
+                ][:5]
+                actions.append(f"Google CSE returned {len(web_results)} lead(s).")
+
+            if scraped_chunks:
+                actions.append("Added community sources from the wider web (untrusted web).")
+                # Merge scraped chunks with wiki chunks; keep order so prompt ranking can choose.
+                chunks = (chunks or []) + scraped_chunks
+        else:
+            actions.append("Tip: enable WEB_SCRAPE_ENABLED=true to cite community sources like Reddit.")
 
     def _build_prompt_chunks(
         *,
