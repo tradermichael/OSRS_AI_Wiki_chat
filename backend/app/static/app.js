@@ -554,6 +554,50 @@ function renderActions(bubble, actions) {
   }
 }
 
+function renderWebResults(bubble, webQuery, webResults) {
+  if (!bubble) return;
+  if (!webResults || !webResults.length) return;
+
+  const box = document.createElement('div');
+  box.className = 'web-results';
+
+  const head = document.createElement('div');
+  head.className = 'web-results-head';
+  head.textContent = webQuery ? `Web leads (Google CSE): ${webQuery}` : 'Web leads (Google CSE):';
+  box.appendChild(head);
+
+  const list = document.createElement('div');
+  list.className = 'web-results-list';
+
+  (webResults || []).slice(0, 5).forEach((r) => {
+    if (!r || !r.url) return;
+    const item = document.createElement('div');
+    item.className = 'web-result';
+
+    const a = document.createElement('a');
+    a.className = 'web-result-title';
+    a.href = String(r.url);
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = String(r.title || r.url);
+    item.appendChild(a);
+
+    if (r.snippet) {
+      const sn = document.createElement('div');
+      sn.className = 'web-result-snippet';
+      sn.textContent = String(r.snippet);
+      item.appendChild(sn);
+    }
+
+    list.appendChild(item);
+  });
+
+  if (list.children.length) {
+    box.appendChild(list);
+    bubble.appendChild(box);
+  }
+}
+
 async function postChatStream(payload, onEvent) {
   const r = await fetch('/api/chat/stream', {
     method: 'POST',
@@ -745,6 +789,9 @@ form.addEventListener('submit', async (e) => {
     }
     if (data.actions && data.actions.length) {
       renderActions(typingBubble, data.actions);
+    }
+    if (data.web_results && data.web_results.length) {
+      renderWebResults(typingBubble, data.web_query, data.web_results);
     }
     if (historyId) {
       attachFeedbackControls(typingBubble, historyId);

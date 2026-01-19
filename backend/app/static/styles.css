@@ -421,6 +421,35 @@ body {
   margin: 4px 0;
 }
 
+.web-results {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(54, 42, 28, 0.25);
+}
+
+.web-results-head {
+  font-size: 14px;
+  color: rgba(40, 30, 20, 0.70);
+  margin-bottom: 6px;
+}
+
+.web-results-list {
+  display: grid;
+  gap: 8px;
+}
+
+.web-result-title {
+  color: rgba(40, 30, 20, 0.92);
+  text-decoration: underline;
+  font-size: 16px;
+}
+
+.web-result-snippet {
+  font-size: 14px;
+  color: rgba(40, 30, 20, 0.78);
+  line-height: 1.2;
+}
+
 .citation-thumbs {
   margin-top: 8px;
   display: flex;

@@ -146,6 +146,8 @@ async def _chat_impl(
     history_store = get_public_chat_store()
 
     actions: list[str] = []
+    web_query: str | None = None
+    web_results: list[dict] = []
 
     async def _status(msg: str) -> None:
         if status_cb:
@@ -199,6 +201,42 @@ async def _chat_impl(
             cand = re.sub(r"\s+", " ", cand)
             if 1 <= len(cand) <= 80:
                 return cand
+
+        def _smart_title_case(s: str) -> str:
+            parts = re.split(r"\s+", (s or "").strip())
+            out: list[str] = []
+            for p in parts:
+                if not p:
+                    continue
+                if re.fullmatch(r"[IVX]{1,8}", p, flags=re.IGNORECASE):
+                    out.append(p.upper())
+                    continue
+                if p.isdigit():
+                    out.append(p)
+                    continue
+                out.append(p[:1].upper() + p[1:])
+            return " ".join(out)
+
+        # Lowercase-friendly fallback: pull entity after common combat verbs.
+        # e.g. "how do I beat the whisperer?" -> "The Whisperer"
+        m2 = re.search(
+            r"\b(?:beat|defeat|kill|fight|handle|survive)\s+(?:the\s+)?([a-z0-9][a-z0-9'\- ]{2,80})",
+            t,
+            flags=re.IGNORECASE,
+        )
+        if m2:
+            tail = (m2.group(1) or "").strip()
+            tail = re.sub(r"\s+", " ", tail).strip("?!.\"'")
+            # Keep it reasonably short.
+            words = tail.split()
+            tail = " ".join(words[:5])
+            if tail:
+                # Bosses/quests that use a leading "The" benefit from adding it.
+                titled = _smart_title_case(tail)
+                if not titled.lower().startswith("the ") and (" the " in f" {t.lower()} "):
+                    titled = "The " + titled
+                if 1 <= len(titled) <= 80:
+                    return titled
         return ""
 
     def _looks_like_strategy_question(message: str) -> bool:
@@ -420,6 +458,19 @@ async def _chat_impl(
         if topic_terms:
             weak_local = weak_local or (hits_topic == 0)
 
+        # If we have a specific topic (boss/quest name), drop chunks that never mention it.
+        # This reduces "random" sources from the local DB when the keyword overlap is weak.
+        if chunks and topic_terms:
+            tt = [t for t in topic_terms[:2] if t]
+            if tt:
+                def _mentions_topic(c) -> bool:
+                    hay = (((getattr(c, "title", "") or "") + "\n" + (getattr(c, "text", "") or "")).lower())
+                    return any(t in hay for t in tt)
+
+                filtered = [c for c in chunks if _mentions_topic(c)]
+                if filtered:
+                    chunks = filtered
+
     # If the local SQLite/BM25 store has nothing (common on fresh deploys),
     # live-query the configured wiki sources and cache the chunks.
     if not chunks or weak_local or force_fresh:
@@ -453,17 +504,28 @@ async def _chat_impl(
         if not chunks:
             await _status("Casting a net into the wider web for leads...")
             try:
-                web_chunks = await live_search_web_and_fetch_chunks(
+                web_chunks, web_hits = await live_search_web_and_fetch_chunks(
                     primary_q,
                     allowed_url_prefixes=prefixes,
                     max_results=5,
                     max_chunks_total=8,
                 )
             except Exception:
-                web_chunks = []
+                web_chunks, web_hits = ([], [])
 
             if web_chunks:
                 actions.append("Used a web search fallback to find the right wiki page.")
+                web_query = primary_q
+                # Include a tiny sample so the UI can show what the web search returned.
+                web_results = [
+                    {
+                        "title": str((r.title or "")[:120]),
+                        "url": str(r.url),
+                        "snippet": (str(r.snippet)[:240] if r.snippet else None),
+                    }
+                    for r in (web_hits or [])
+                    if getattr(r, "url", None)
+                ][:5]
                 chunks = web_chunks
                 # best-effort cache
                 try:
@@ -507,11 +569,15 @@ async def _chat_impl(
         return sum(1 for t in key_terms_for_prompt if t and t.lower() in hay)
 
     # Rank pages by their best matching chunk score.
-    ranked_urls = sorted(
-        url_to_chunks.keys(),
-        key=lambda u: max((_chunk_score((c.text or "")) for c in url_to_chunks.get(u, [])), default=0),
-        reverse=True,
-    )
+    ranked_pairs: list[tuple[str, int]] = []
+    for u, cs in url_to_chunks.items():
+        best = max((_chunk_score((c.text or "")) for c in (cs or [])), default=0)
+        ranked_pairs.append((u, int(best)))
+
+    ranked_pairs.sort(key=lambda p: p[1], reverse=True)
+    # If we have at least one relevant page, drop zero-score URLs so we don't cite random pages.
+    nonzero = [u for (u, s) in ranked_pairs if s > 0]
+    ranked_urls = nonzero if nonzero else [u for (u, _s) in ranked_pairs]
 
     prompt_chunks = []
     for u in ranked_urls[:6]:
@@ -580,6 +646,8 @@ async def _chat_impl(
             history_id=str(history_id),
             videos=videos,
             actions=actions + ["Could not reach Gemini; returned a friendly fallback."],
+            web_query=web_query,
+            web_results=web_results,
         )
 
     actions.append("Composed the reply with citations.")
@@ -674,6 +742,8 @@ async def _chat_impl(
         history_id=str(history_id),
         videos=videos,
         actions=actions,
+        web_query=web_query,
+        web_results=web_results,
     )
 
 

@@ -41,6 +41,28 @@ _STOPWORDS = {
     "with",
     "you",
     "your",
+
+    # Combat / guide filler terms (keep retrieval focused on the entity name)
+    "beat",
+    "defeat",
+    "kill",
+    "fight",
+    "boss",
+    "strategy",
+    "strategies",
+    "guide",
+    "tips",
+    "gear",
+    "inventory",
+    "mechanic",
+    "mechanics",
+    "phase",
+    "prayer",
+    "pray",
+    "quick",
+    "walkthrough",
+    "requirements",
+    "reqs",
 }
 
 

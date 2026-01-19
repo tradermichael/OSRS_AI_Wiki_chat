@@ -7,7 +7,7 @@ from ..core.rag_sources import load_rag_sources
 from ..core.config import settings
 from .ingest_mediawiki import chunk_page
 from .ingest_mediawiki import mediawiki_search, mediawiki_fetch_plaintext
-from .google_cse import google_cse_search, url_to_title
+from .google_cse import SearchResult, google_cse_search, url_to_title
 from .query_expansion import extract_keywords
 from .store import RetrievedChunk
 
@@ -245,7 +245,7 @@ async def live_search_web_and_fetch_chunks(
     max_results: int = 5,
     max_chunks_total: int = 8,
     allowed_url_prefixes: list[str] | None = None,
-) -> list[RetrievedChunk]:
+) -> tuple[list[RetrievedChunk], list[SearchResult]]:
     """Live search via Google PSE, then fetch plaintext from matched wiki pages.
 
     This keeps citations on the allowed wiki sites (your PSE config should also restrict sites).
@@ -254,7 +254,7 @@ async def live_search_web_and_fetch_chunks(
     api_key = settings.google_cse_api_key
     cx = settings.google_cse_cx
     if not api_key or not cx:
-        return []
+        return ([], [])
 
     prefixes = tuple(p for p in (allowed_url_prefixes or []) if p)
     sources = load_rag_sources()
@@ -270,7 +270,7 @@ async def live_search_web_and_fetch_chunks(
     if prefixes:
         urls = [u for u in urls if u.startswith(prefixes)]
     if not urls:
-        return []
+        return ([], results)
 
     out: list[RetrievedChunk] = []
     seen_url: set[str] = set()
@@ -310,6 +310,6 @@ async def live_search_web_and_fetch_chunks(
                 )
             )
             if len(out) >= max_chunks_total:
-                return out[:max_chunks_total]
+                return (out[:max_chunks_total], results)
 
-    return out[:max_chunks_total]
+    return (out[:max_chunks_total], results)

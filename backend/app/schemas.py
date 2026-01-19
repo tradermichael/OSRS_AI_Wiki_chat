@@ -22,12 +22,20 @@ class VideoItem(BaseModel):
     summary: str
 
 
+class WebSearchResult(BaseModel):
+    title: str
+    url: str
+    snippet: str | None = None
+
+
 class ChatResponse(BaseModel):
     answer: str
     sources: list[SourceChunk] = []
     history_id: str | None = None
     videos: list[VideoItem] = []
     actions: list[str] = []
+    web_query: str | None = None
+    web_results: list[WebSearchResult] = []
 
 
 class CreatePayPalOrderRequest(BaseModel):
