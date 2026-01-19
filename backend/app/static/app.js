@@ -4,6 +4,7 @@ const input = document.getElementById('message');
 const historyListEl = document.getElementById('historyList');
 const refreshHistoryBtn = document.getElementById('refreshHistory');
 const toggleHistoryBtn = document.getElementById('toggleHistory');
+const fullscreenToggleBtn = document.getElementById('fullscreenToggle');
 const appLayoutEl = document.querySelector('.app-layout');
 const viewBannerEl = document.getElementById('viewBanner');
 const viewBannerTextEl = document.getElementById('viewBannerText');
@@ -25,6 +26,24 @@ let viewingHistoryId = null;
 const SESSION_ID_KEY = 'osrs_session_id';
 const LIVE_CHAT_KEY = 'osrs_live_chat_v1';
 const HISTORY_SIDEBAR_KEY = 'osrs_history_sidebar_open';
+
+function isFullscreen() {
+  return Boolean(document.fullscreenElement);
+}
+
+function setFullscreenBtnState() {
+  if (!fullscreenToggleBtn) return;
+  const enabled = Boolean(document.fullscreenEnabled);
+  if (!enabled) {
+    fullscreenToggleBtn.hidden = true;
+    return;
+  }
+
+  const on = isFullscreen();
+  const label = on ? 'Exit fullscreen' : 'Enter fullscreen';
+  fullscreenToggleBtn.title = label;
+  fullscreenToggleBtn.setAttribute('aria-label', label);
+}
 
 function getSessionId() {
   let sid = localStorage.getItem(SESSION_ID_KEY);
@@ -697,8 +716,33 @@ document.addEventListener('DOMContentLoaded', () => {
   if (appLayoutEl && open === '0') {
     appLayoutEl.classList.add('sidebar-collapsed');
   }
+  setFullscreenBtnState();
   loadHistory();
 });
+
+if (fullscreenToggleBtn) {
+  setFullscreenBtnState();
+
+  fullscreenToggleBtn.addEventListener('click', async () => {
+    try {
+      if (!document.fullscreenEnabled) return;
+      if (isFullscreen()) {
+        await document.exitFullscreen();
+      } else {
+        // Fullscreen the whole document so the chat layout has maximum room.
+        await document.documentElement.requestFullscreen();
+      }
+    } catch {
+      // ignore
+    } finally {
+      setFullscreenBtnState();
+    }
+  });
+
+  document.addEventListener('fullscreenchange', () => {
+    setFullscreenBtnState();
+  });
+}
 
 if (toggleHistoryBtn && appLayoutEl) {
   toggleHistoryBtn.addEventListener('click', () => {
