@@ -843,30 +843,55 @@ function initVoiceChat() {
     voiceChatDisconnectBtn.addEventListener('click', () => disconnect());
   }
 
-  const startEvt = async (e) => {
-    e.preventDefault();
-    if (input && input.disabled) return;
-    await connect();
-    try { await setupMicIfNeeded(); } catch {
-      setVoiceChatState('Microphone permission denied.');
-      return;
-    }
-    startTalking();
-  };
+  // Push-to-talk: use Pointer Events + pointer capture so holding is reliable
+  // and we don't need global mouseup/touchend listeners (which can fire in
+  // surprising ways and make PTT "flash").
+  let activePointerId = null;
 
-  const stopEvt = (e) => {
-    // Important: do NOT preventDefault unless we're actually talking.
-    // Otherwise, a global mouseup/touchend handler can block normal clicks/focus
-    // and make the whole app feel "frozen".
-    if (!talking) return;
+  pushToTalkBtn.addEventListener('pointerdown', async (e) => {
+    if (e.button != null && e.button !== 0) return; // left click only
+    if (activePointerId != null) return;
+    if (input && input.disabled) return;
+
+    activePointerId = e.pointerId;
+    try { pushToTalkBtn.setPointerCapture(activePointerId); } catch { /* ignore */ }
+
+    // Only prevent default while interacting with PTT.
+    e.preventDefault();
+
+    // Start UI immediately; audio will stream as soon as ws+mic are ready.
+    startTalking();
+    setVoiceChatState('Listening…');
+
+    try {
+      // Ensure we're connected and the mic processor is running.
+      await connect();
+      await setupMicIfNeeded();
+    } catch {
+      setVoiceChatState('Microphone permission denied.');
+      stopTalking();
+      activePointerId = null;
+      try { pushToTalkBtn.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+  });
+
+  pushToTalkBtn.addEventListener('pointerup', (e) => {
+    if (activePointerId == null) return;
+    if (e.pointerId !== activePointerId) return;
     e.preventDefault();
     stopTalking();
-  };
+    try { pushToTalkBtn.releasePointerCapture(activePointerId); } catch { /* ignore */ }
+    activePointerId = null;
+    if (ws && ws.readyState === WebSocket.OPEN) setVoiceChatState('Connected. Hold to talk.');
+  });
 
-  pushToTalkBtn.addEventListener('mousedown', startEvt);
-  pushToTalkBtn.addEventListener('touchstart', startEvt, { passive: false });
-  window.addEventListener('mouseup', stopEvt);
-  window.addEventListener('touchend', stopEvt, { passive: false });
+  pushToTalkBtn.addEventListener('pointercancel', (e) => {
+    if (activePointerId == null) return;
+    if (e.pointerId !== activePointerId) return;
+    stopTalking();
+    try { pushToTalkBtn.releasePointerCapture(activePointerId); } catch { /* ignore */ }
+    activePointerId = null;
+  });
 
   // Default UI state.
   setPanelOpen(false);
