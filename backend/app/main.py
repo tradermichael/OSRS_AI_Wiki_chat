@@ -54,6 +54,108 @@ from .schemas import (
 
 app = FastAPI(title="OSRS AI Wiki Chat")
 
+
+async def _auto_retry_targeted_retrieval(
+    *,
+    raw_user_message: str,
+    user_message: str,
+    retrieval_seed: str,
+    topic_hint: str,
+    msg_l: str,
+    difficulty_question: bool,
+    queries: list[str],
+    prefixes: list[str] | None,
+    existing_web_query: str | None,
+    existing_web_results: list[WebSearchResult] | None,
+) -> tuple[list[RetrievedChunk], str | None, list[WebSearchResult] | None, list[str]]:
+    """Best-effort retry when first-pass retrieval yields no usable prompt chunks.
+
+    Returns: (chunks, web_query, web_results, actions_to_add)
+    """
+
+    actions: list[str] = []
+
+    retry_candidates: list[str] = []
+    for q in (queries or []):
+        qq = (q or "").strip()
+        if qq:
+            retry_candidates.append(qq)
+
+    # If this reads like a boss difficulty question, try boss-focused variants.
+    if topic_hint and (difficulty_question or ("boss" in msg_l) or ("fight" in msg_l)):
+        boss_map = {
+            "Song of the Elves": ["Fragment of Seren", "Fragment of Seren/Strategies"],
+        }
+        for extra in boss_map.get(topic_hint, []):
+            retry_candidates.insert(0, extra)
+        retry_candidates.insert(0, f"{topic_hint} toughest boss")
+        retry_candidates.insert(0, f"{topic_hint} final boss")
+        retry_candidates.insert(0, f"{topic_hint} boss")
+
+    for q in (retrieval_seed, raw_user_message, user_message):
+        qq = (q or "").strip()
+        if qq:
+            retry_candidates.append(qq)
+
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for q in retry_candidates:
+        qn = (q or "").strip()
+        if not qn:
+            continue
+        key = qn.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(qn)
+    retry_candidates = deduped
+
+    # 1) Try MediaWiki first.
+    for q in retry_candidates[:6]:
+        try:
+            live_chunks = await live_query_chunks(q, allowed_url_prefixes=prefixes)
+        except Exception:
+            live_chunks = []
+        if live_chunks:
+            actions.append("Auto-retry: performed a targeted wiki lookup.")
+            return live_chunks, existing_web_query, existing_web_results, actions
+
+    # 2) If CSE is configured, try one last web fetch.
+    if settings.google_cse_api_key and (settings.google_cse_cx or settings.google_cse_community_cx):
+        q = (retry_candidates[0] if retry_candidates else "") or (raw_user_message or user_message or retrieval_seed)
+        try:
+            web_chunks, web_hits = await live_search_web_and_fetch_chunks(
+                q,
+                allowed_url_prefixes=prefixes,
+                max_results=5,
+                max_chunks_total=8,
+            )
+        except Exception:
+            web_chunks, web_hits = ([], [])
+
+        web_query = existing_web_query
+        web_results = existing_web_results
+
+        if web_hits and not web_results:
+            web_query = q
+            web_results = [
+                WebSearchResult(
+                    title=str((r.title or "")[:120]),
+                    url=str(r.url),
+                    snippet=(str(r.snippet)[:240] if r.snippet else None),
+                )
+                for r in (web_hits or [])
+                if getattr(r, "url", None)
+            ][:5]
+            actions.append(f"Google CSE returned {len(web_results)} lead(s).")
+
+        if web_chunks:
+            actions.append("Auto-retry: used web search to fetch wiki excerpts.")
+            return web_chunks, web_query, web_results, actions
+
+    return [], existing_web_query, existing_web_results, actions
+
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -949,10 +1051,25 @@ async def _chat_impl(
     strategy_followup = bool(topic_hint and _looks_like_strategy_question(user_message))
     quest_help = bool(topic_hint and _looks_like_quest_help_question(user_message))
 
-    # Difficulty/"hardest part" questions are often hybrid: part community consensus, part practical help.
+    # Difficulty/"hardest" questions are often hybrid: part community consensus, part practical help.
     # Treat them as opinion/community even if an intent classifier leans "gameplay".
     msg_l = (user_message or "").lower()
-    difficulty_question = any(w in msg_l for w in ("hardest", "most difficult", "difficulty", "hard part", "hardest part"))
+    difficulty_question = any(
+        w in msg_l
+        for w in (
+            "hardest",
+            "most difficult",
+            "most challenging",
+            "difficulty",
+            "hard part",
+            "hardest part",
+            "toughest",
+            "toughest boss",
+            "hardest boss",
+            "toughest fight",
+            "hardest fight",
+        )
+    )
 
     # If the user asks for "latest"/"current" info, skip the answer cache.
     force_fresh = any(w in msg_l for w in ("latest", "today", "current", "new", "update"))
@@ -1061,7 +1178,7 @@ async def _chat_impl(
                 if th and qq.lower() == th.lower():
                     continue
                 # Prefer subpages and explicit modifiers.
-                if "/" in qq or any(w in qq.lower() for w in ("strateg", "walkthrough", "quick guide", "boss", "fight", "hardest")):
+                if "/" in qq or any(w in qq.lower() for w in ("strateg", "walkthrough", "quick guide", "boss", "fight", "hardest", "toughest", "challeng")):
                     return qq
 
         # If the user asked a richer question than just the topic title, prefer their raw phrasing.
@@ -1821,6 +1938,38 @@ async def _chat_impl(
                 )
         except Exception:
             pass
+
+    if not prompt_chunks:
+        # Auto-retry once with a more targeted wiki query. This prevents users from needing
+        # to re-ask questions when retrieval is flaky or the first query was too broad.
+        await _status("Trying a more targeted lookup...")
+        retry_chunks, retry_web_query, retry_web_results, retry_actions = await _auto_retry_targeted_retrieval(
+            raw_user_message=(raw_user_message or ""),
+            user_message=(user_message or ""),
+            retrieval_seed=(retrieval_seed or ""),
+            topic_hint=(topic_hint or ""),
+            msg_l=(msg_l or ""),
+            difficulty_question=bool(difficulty_question),
+            queries=(queries or []),
+            prefixes=prefixes,
+            existing_web_query=web_query,
+            existing_web_results=web_results,
+        )
+        if retry_chunks:
+            actions.extend(retry_actions)
+            chunks = retry_chunks
+            if retry_web_query:
+                web_query = retry_web_query
+            if retry_web_results is not None:
+                web_results = retry_web_results
+            prompt_chunks = _build_prompt_chunks(
+                chunks=chunks,
+                retrieval_seed=retrieval_seed,
+                user_question=(raw_user_message or user_message or ""),
+                topic_hint=topic_hint,
+                prefixes=prefixes,
+                allow_external_sources=allow_external_sources,
+            )
 
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
