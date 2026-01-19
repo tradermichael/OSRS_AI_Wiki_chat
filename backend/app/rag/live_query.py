@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from urllib.parse import urlparse
 
 from ..core.rag_sources import load_rag_sources
 from ..core.config import settings
@@ -306,6 +307,30 @@ async def live_search_web_and_fetch_chunks(
     filtered_results = [r for r in results if getattr(r, "url", None)]
     if prefixes:
         filtered_results = [r for r in filtered_results if str(r.url).startswith(prefixes)]
+
+    # If the CSE is not site-restricted, it may return only non-wiki results even when a wiki page exists.
+    # In that case, retry with an explicit site: restriction derived from the allowed prefixes.
+    if prefixes and not filtered_results:
+        hosts: list[str] = []
+        for p in prefixes:
+            try:
+                h = (urlparse(p).netloc or "").strip().lower()
+            except Exception:
+                h = ""
+            if h and h not in hosts:
+                hosts.append(h)
+        for h in hosts[:2]:
+            try:
+                restricted_q = f"{query} site:{h}".strip()
+                retry = await google_cse_search(api_key=api_key, cx=cx, query=restricted_q, num=max_results)
+            except Exception:
+                retry = []
+            retry_filtered = [r for r in (retry or []) if getattr(r, "url", None)]
+            retry_filtered = [r for r in retry_filtered if str(r.url).startswith(prefixes)]
+            if retry_filtered:
+                results = retry
+                filtered_results = retry_filtered
+                break
     if not filtered_results:
         return ([], results)
 
