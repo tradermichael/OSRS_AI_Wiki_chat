@@ -69,3 +69,11 @@ class GoldStore:
             )
             conn.commit()
             return new_total
+
+
+def get_gold_store():
+    if (settings.gold_backend or "sqlite").lower() == "firestore":
+        from .firestore_store import FirestoreGoldStore
+
+        return FirestoreGoldStore()
+    return GoldStore()

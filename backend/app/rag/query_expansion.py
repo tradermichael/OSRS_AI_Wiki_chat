@@ -83,18 +83,46 @@ def derive_search_queries(user_message: str) -> list[str]:
 
     queries: list[str] = []
 
+    msg_l = msg.lower()
+    combat_intent = any(
+        w in msg_l
+        for w in (
+            "beat",
+            "defeat",
+            "kill",
+            "fight",
+            "strategy",
+            "strategies",
+            "guide",
+            "gear",
+            "inventory",
+            "mechanic",
+            "mechanics",
+            "pray",
+            "prayer",
+        )
+    )
+
     m = re.search(r"\babout\s+(.+)$", msg, flags=re.IGNORECASE)
     if m:
         topic = m.group(1).strip().strip("?!.\"")
         if topic:
             queries.append(topic)
             queries.append(f"{topic} osrs")
+            if combat_intent:
+                queries.append(f"{topic} strategies")
+                queries.append(f"{topic}/Strategies")
+                queries.append(f"{topic} boss fight")
 
     keys = _keywords(msg)
     if keys:
         key_q = " ".join(keys[:8])
         queries.append(key_q)
         queries.append(f"{key_q} osrs")
+
+        # If the user is asking how to beat/handle something, bias towards strategy pages.
+        if combat_intent and len(keys) >= 1:
+            queries.append(f"{key_q} strategies")
 
     # Always include the raw message last.
     queries.append(msg)

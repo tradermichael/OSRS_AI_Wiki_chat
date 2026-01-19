@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Wise Old Man crown">
+  <defs>
+    <linearGradient id="crown" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4aa3ff"/>
+      <stop offset="1" stop-color="#1f5fbf"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="#0b1320"/>
+
+  <!-- crown base -->
+  <path d="M92 214c-6-10 5-22 16-17l76 34 56-92c6-10 21-10 27 0l56 92 76-34c11-5 22 7 16 17l-64 274H156L92 214z"
+        fill="url(#crown)" stroke="#0e2a55" stroke-width="14" stroke-linejoin="round"/>
+
+  <!-- inner cut to give depth -->
+  <path d="M132 246l58 24 66-108 66 108 58-24-44 196H176l-44-196z"
+        fill="#163a76" opacity="0.55"/>
+
+  <!-- simple gems -->
+  <circle cx="256" cy="198" r="18" fill="#f3d27a" stroke="#5b3d14" stroke-width="8"/>
+  <circle cx="176" cy="228" r="14" fill="#f3d27a" stroke="#5b3d14" stroke-width="7"/>
+  <circle cx="336" cy="228" r="14" fill="#f3d27a" stroke="#5b3d14" stroke-width="7"/>
+
+  <!-- highlight -->
+  <path d="M118 228c36-12 70-2 98 10 25 11 46 17 70 13 18-3 36-13 58-22 18-7 43-13 74-4l-18 78c-22-8-42-6-58 0-20 7-38 18-60 22-31 6-58-4-84-15-22-10-47-18-78-8l-2-4-10-70z"
+        fill="url(#shine)"/>
+</svg>

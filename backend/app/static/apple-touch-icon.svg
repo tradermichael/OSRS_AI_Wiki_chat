@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Wise Old Man crown">
+  <defs>
+    <linearGradient id="crown" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4aa3ff"/>
+      <stop offset="1" stop-color="#1f5fbf"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="#0b1320"/>
+  <path d="M92 214c-6-10 5-22 16-17l76 34 56-92c6-10 21-10 27 0l56 92 76-34c11-5 22 7 16 17l-64 274H156L92 214z"
+        fill="url(#crown)" stroke="#0e2a55" stroke-width="14" stroke-linejoin="round"/>
+  <circle cx="256" cy="198" r="18" fill="#f3d27a" stroke="#5b3d14" stroke-width="8"/>
+</svg>

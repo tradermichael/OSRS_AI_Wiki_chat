@@ -37,6 +37,11 @@ class Settings(BaseSettings):
     # Fake "gold" donation counter. Defaults to RAG_DB_PATH if not set.
     gold_db_path: str | None = None
 
+    # Gold persistence backend.
+    # sqlite: local file (ephemeral on Cloud Run)
+    # firestore: persistent in GCP Firestore
+    gold_backend: str = "sqlite"  # sqlite|firestore
+
     # Public chat history log storage. Defaults to RAG_DB_PATH if not set.
     history_db_path: str | None = None
 
@@ -45,6 +50,10 @@ class Settings(BaseSettings):
     # firestore: persistent in GCP Firestore
     history_backend: str = "sqlite"  # sqlite|firestore
     firestore_collection: str = "public_chat"
+
+    # Firestore site-state storage (used for global gold total).
+    firestore_site_collection: str = "site_state"
+    firestore_gold_doc: str = "gold_total"
 
     paypal_env: str = "sandbox"  # sandbox|live
     paypal_client_id: str | None = None

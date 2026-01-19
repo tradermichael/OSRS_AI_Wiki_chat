@@ -56,6 +56,7 @@ async def mediawiki_fetch_plaintext(base_api: str, title: str) -> WikiPage:
         "inprop": "url",
         "explaintext": "1",
         "exsectionformat": "plain",
+        "redirects": "1",
         "titles": title,
         "format": "json",
     }

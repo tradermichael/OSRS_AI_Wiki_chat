@@ -1,0 +1,16 @@
+{
+  "name": "OSRS AI Wiki Chat",
+  "short_name": "OSRS AI",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0b1320",
+  "theme_color": "#0b1320",
+  "icons": [
+    {
+      "src": "/static/apple-touch-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

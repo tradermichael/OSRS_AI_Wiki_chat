@@ -27,6 +27,7 @@ class ChatResponse(BaseModel):
     sources: list[SourceChunk] = []
     history_id: str | None = None
     videos: list[VideoItem] = []
+    actions: list[str] = []
 
 
 class CreatePayPalOrderRequest(BaseModel):

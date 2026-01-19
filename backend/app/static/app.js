@@ -129,6 +129,28 @@ function renderCitations(bubble, sources) {
 function renderVideos(bubble, videos) {
   if (!videos || !videos.length) return;
 
+  function youtubeVideoId(url) {
+    const u = String(url || '').trim();
+    if (!u) return null;
+    try {
+      const parsed = new URL(u);
+      const host = (parsed.hostname || '').toLowerCase();
+      if (host === 'youtu.be') {
+        const id = (parsed.pathname || '').replace('/', '').trim();
+        return id || null;
+      }
+      if (host.endsWith('youtube.com')) {
+        const id = parsed.searchParams.get('v');
+        return (id && String(id).trim()) ? String(id).trim() : null;
+      }
+    } catch {
+      // ignore
+    }
+    // last-chance regex
+    const m = u.match(/[?&]v=([^&]+)/i);
+    return m ? String(m[1] || '').trim() || null : null;
+  }
+
   const box = document.createElement('div');
   box.className = 'videos';
 
@@ -144,6 +166,45 @@ function renderVideos(bubble, videos) {
     if (!v || !v.url) return;
     const item = document.createElement('div');
     item.className = 'video';
+
+    const vid = youtubeVideoId(v.url);
+    if (vid) {
+      const player = document.createElement('div');
+      player.className = 'video-player';
+
+      const thumbBtn = document.createElement('button');
+      thumbBtn.type = 'button';
+      thumbBtn.className = 'video-thumb';
+      thumbBtn.setAttribute('aria-label', 'Play video');
+
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.alt = String(v.title || 'YouTube video');
+      img.src = `https://i.ytimg.com/vi/${encodeURIComponent(vid)}/hqdefault.jpg`;
+      thumbBtn.appendChild(img);
+
+      const play = document.createElement('div');
+      play.className = 'video-play';
+      play.setAttribute('aria-hidden', 'true');
+      play.textContent = '▶';
+      thumbBtn.appendChild(play);
+
+      thumbBtn.addEventListener('click', () => {
+        const iframe = document.createElement('iframe');
+        iframe.className = 'video-iframe';
+        iframe.loading = 'lazy';
+        iframe.allowFullscreen = true;
+        iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+        iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+        iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1`;
+        iframe.title = String(v.title || 'YouTube video');
+
+        player.replaceChildren(iframe);
+      });
+
+      player.appendChild(thumbBtn);
+      item.appendChild(player);
+    }
 
     const a = document.createElement('a');
     a.className = 'video-title';
@@ -177,9 +238,9 @@ function setWikiPreviewVisible(visible) {
 }
 
 function setWikiPreviewLoading(url) {
-  if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Loading…';
+  if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Loading...';
   if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = url || '#';
-  if (wikiPreviewExtractEl) wikiPreviewExtractEl.textContent = 'Fetching preview from the wiki…';
+  if (wikiPreviewExtractEl) wikiPreviewExtractEl.textContent = 'Fetching preview from the wiki...';
   if (wikiPreviewThumbEl) {
     wikiPreviewThumbEl.hidden = true;
     wikiPreviewThumbEl.src = '';
@@ -411,7 +472,7 @@ function renderHistory(items) {
     const q = document.createElement('div');
     q.className = 'history-q';
     const snippet = String(it.user_message || '').replace(/\s+/g, ' ').trim();
-    q.textContent = snippet.length > 80 ? `${snippet.slice(0, 80)}…` : snippet;
+    q.textContent = snippet.length > 80 ? `${snippet.slice(0, 80)}...` : snippet;
 
     row.appendChild(meta);
     row.appendChild(q);
@@ -450,13 +511,98 @@ function addTyping() {
   bubble.querySelector('.text').innerHTML = `
     <span class="typing" aria-label="${BOT_NAME} is responding">
       <span class="orb" aria-hidden="true"></span>
-      <span>Conjuring…</span>
+      <span class="typing-status">Conjuring...</span>
       <span class="dots" aria-hidden="true"><span></span><span></span><span></span></span>
     </span>
   `;
   messagesEl.appendChild(row);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return bubble;
+}
+
+function setTypingStatus(bubble, text) {
+  if (!bubble) return;
+  const el = bubble.querySelector('.typing-status');
+  if (el) el.textContent = String(text || '').trim() || 'Conjuring...';
+}
+
+function renderActions(bubble, actions) {
+  if (!bubble) return;
+  if (!actions || !actions.length) return;
+
+  const box = document.createElement('div');
+  box.className = 'actions';
+
+  const head = document.createElement('div');
+  head.className = 'actions-head';
+  head.textContent = 'What I did: ';
+  box.appendChild(head);
+
+  const list = document.createElement('ul');
+  list.className = 'actions-list';
+
+  (actions || []).slice(0, 8).forEach((a) => {
+    const li = document.createElement('li');
+    li.textContent = String(a || '').trim();
+    if (!li.textContent) return;
+    list.appendChild(li);
+  });
+
+  if (list.children.length) {
+    box.appendChild(list);
+    bubble.appendChild(box);
+  }
+}
+
+async function postChatStream(payload, onEvent) {
+  const r = await fetch('/api/chat/stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${r.status}`);
+  }
+
+  if (!r.body || !r.body.getReader) {
+    throw new Error('Streaming not supported by this browser.');
+  }
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+
+    while (true) {
+      const idx = buf.indexOf('\n');
+      if (idx < 0) break;
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line) continue;
+      let ev;
+      try {
+        ev = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      onEvent && onEvent(ev);
+    }
+  }
+
+  const tail = buf.trim();
+  if (tail) {
+    try {
+      onEvent && onEvent(JSON.parse(tail));
+    } catch {
+      // ignore
+    }
+  }
 }
 
 addMessage('bot', BOT_NAME, 'Ask me anything about OSRS.');
@@ -530,20 +676,60 @@ form.addEventListener('submit', async (e) => {
   addMessage('me', 'You', msg);
 
   const typingBubble = addTyping();
+  setTypingStatus(typingBubble, 'Consulting my shelves...');
+
+  // Flavor fallback in case the stream takes a moment to yield the first status.
+  const flavor = [
+    'Scouring the shelves of my tomes...',
+    'Unlocking the magical trunks of knowledge...',
+    'Consulting the enchanted index...',
+    'Brushing dust off old scrolls...',
+    'Pinning citations to the parchment...'
+  ];
+  let flavorI = 0;
+  let gotLiveStatus = false;
+  const flavorTimer = setInterval(() => {
+    if (gotLiveStatus) return;
+    flavorI = (flavorI + 1) % flavor.length;
+    setTypingStatus(typingBubble, flavor[flavorI]);
+  }, 1300);
 
   try {
-    const r = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, session_id: getSessionId() })
-    });
+    const payload = { message: msg, session_id: getSessionId() };
 
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      throw new Error(err.detail || `HTTP ${r.status}`);
+    let finalData = null;
+    try {
+      await postChatStream(payload, (ev) => {
+        if (!ev || typeof ev !== 'object') return;
+        if (ev.type === 'status') {
+          gotLiveStatus = true;
+          setTypingStatus(typingBubble, ev.text || 'Conjuring...');
+          return;
+        }
+        if (ev.type === 'final') {
+          finalData = ev.data || null;
+          return;
+        }
+        if (ev.type === 'error') {
+          throw new Error(ev.detail || `HTTP ${ev.status || 500}`);
+        }
+      });
+    } catch (streamErr) {
+      // Streaming is best-effort; fall back to the normal JSON endpoint.
+      const r = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || streamErr.message || `HTTP ${r.status}`);
+      }
+      finalData = await r.json();
     }
 
-    const data = await r.json();
+    const data = finalData || {};
 
     // Replace typing bubble contents with the real answer + citations + feedback.
     const answerText = data.answer || '(no answer)';
@@ -557,6 +743,9 @@ form.addEventListener('submit', async (e) => {
     if (data.videos && data.videos.length) {
       renderVideos(typingBubble, data.videos);
     }
+    if (data.actions && data.actions.length) {
+      renderActions(typingBubble, data.actions);
+    }
     if (historyId) {
       attachFeedbackControls(typingBubble, historyId);
     }
@@ -566,6 +755,7 @@ form.addEventListener('submit', async (e) => {
     typingBubble.querySelector('.text').textContent = err.message || String(err);
     typingBubble.querySelector('.role').textContent = 'Error';
   } finally {
+    clearInterval(flavorTimer);
     // Since every chat is publicly stored, refresh the sidebar.
     loadHistory();
   }

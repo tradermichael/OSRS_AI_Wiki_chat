@@ -397,6 +397,30 @@ body {
   text-decoration: underline;
 }
 
+.actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed rgba(54, 42, 28, 0.25);
+}
+
+.actions-head {
+  font-size: 14px;
+  color: rgba(40, 30, 20, 0.70);
+  margin-bottom: 6px;
+}
+
+.actions-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 16px;
+  line-height: 1.25;
+  color: rgba(33, 25, 16, 0.92);
+}
+
+.actions-list li {
+  margin: 4px 0;
+}
+
 .citation-thumbs {
   margin-top: 8px;
   display: flex;
@@ -441,6 +465,53 @@ body {
   border-radius: 10px;
   padding: 10px;
   background: rgba(255, 255, 255, 0.10);
+}
+
+.video-player {
+  width: 100%;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(54, 42, 28, 0.25);
+  background: rgba(0, 0, 0, 0.15);
+  margin-bottom: 8px;
+}
+
+.video-thumb {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+}
+
+.video-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.video-play {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 44px;
+  line-height: 1;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 8px 18px rgba(0, 0, 0, 0.55);
+  background: radial-gradient(circle at center, rgba(0, 0, 0, 0.22), rgba(0, 0, 0, 0) 60%);
+}
+
+.video-iframe {
+  width: 100%;
+  height: 100%;
+  display: block;
+  border: 0;
+  aspect-ratio: 16 / 9;
 }
 
 .video-title {
