@@ -19,6 +19,21 @@ GEMINI_MODEL=gemini-2.5-flash
 GOOGLE_CSE_API_KEY=
 GOOGLE_CSE_CX=
 
+# Optional: scrape non-wiki CSE results (untrusted web). Off by default.
+WEB_SCRAPE_ENABLED=false
+WEB_SCRAPE_MAX_PAGES=3
+WEB_SCRAPE_MAX_CHUNKS_TOTAL=6
+WEB_SCRAPE_MAX_BYTES=800000
+WEB_SCRAPE_TIMEOUT_S=15
+
+# Optional: OSRSBox structured dataset ingestion and citations
+OSRSBOX_ENABLED=false
+OSRSBOX_BASE_URL=https://www.osrsbox.com/osrsbox-db/
+
+# Optional: OSRSBox static JSON DB (structured source). Requires local ingestion.
+OSRSBOX_ENABLED=false
+OSRSBOX_BASE_URL=https://www.osrsbox.com/osrsbox-db/
+
 # YouTube Data API v3 (optional)
 GCP_YT_API_KEY=
 

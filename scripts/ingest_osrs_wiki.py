@@ -32,6 +32,8 @@ async def main() -> None:
         )
 
     api = source.mediawiki_api
+    if not api:
+        raise SystemExit(f"Source '{args.source}' has no mediawiki_api; cannot ingest MediaWiki pages from it.")
 
     pages = await search_and_fetch(api, args.query, limit=args.limit)
 

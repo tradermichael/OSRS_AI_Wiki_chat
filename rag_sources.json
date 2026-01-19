@@ -15,6 +15,18 @@
       "allowed_url_prefixes": [
         "https://oldschoolrunescape.fandom.com/wiki/"
       ]
+    },
+    {
+      "id": "osrsbox",
+      "name": "OSRSBox (structured DB/API)",
+      "mediawiki_api": null,
+      "allowed_url_prefixes": [
+        "https://www.osrsbox.com/osrsbox-db/",
+        "https://api.osrsbox.com/",
+        "https://raw.githubusercontent.com/osrsbox/osrsbox-db/",
+        "https://github.com/osrsbox/osrsbox-db",
+        "https://github.com/osrsbox/osrsbox-api"
+      ]
     }
   ]
 }

@@ -11,7 +11,7 @@ from .config import settings
 class RAGSource:
     id: str
     name: str
-    mediawiki_api: str
+    mediawiki_api: str | None
     allowed_url_prefixes: list[str]
 
 
@@ -35,7 +35,7 @@ def load_rag_sources(config_path: str | None = None) -> list[RAGSource]:
         api = (s or {}).get("mediawiki_api")
         prefixes = (s or {}).get("allowed_url_prefixes") or []
 
-        if not sid or not api:
+        if not sid:
             continue
         if not isinstance(prefixes, list):
             prefixes = []
@@ -44,7 +44,7 @@ def load_rag_sources(config_path: str | None = None) -> list[RAGSource]:
             RAGSource(
                 id=str(sid),
                 name=str(name or sid),
-                mediawiki_api=str(api),
+                mediawiki_api=str(api) if api else None,
                 allowed_url_prefixes=[str(p) for p in prefixes if p],
             )
         )
@@ -55,6 +55,8 @@ def load_rag_sources(config_path: str | None = None) -> list[RAGSource]:
 def allowed_url_prefixes(config_path: str | None = None) -> list[str]:
     prefixes: list[str] = []
     for s in load_rag_sources(config_path=config_path):
+        if s.id == "osrsbox" and not bool(settings.osrsbox_enabled):
+            continue
         prefixes.extend(s.allowed_url_prefixes)
     # de-dupe while preserving order
     seen: set[str] = set()

@@ -45,6 +45,24 @@ class Settings(BaseSettings):
     google_cse_api_key: str | None = None
     google_cse_cx: str | None = None
 
+    # Optional: scrape non-wiki pages returned by Google CSE.
+    # This is "untrusted web" retrieval and may include ads/opinions; keep it off by default.
+    web_scrape_enabled: bool = False
+    web_scrape_max_pages: int = 3
+    web_scrape_max_chunks_total: int = 6
+    web_scrape_max_bytes: int = 800_000  # cap HTML bytes fetched per page
+    web_scrape_timeout_s: float = 15.0
+
+    # Optional: OSRSBox structured dataset ingestion (items/monsters).
+    # When enabled, OSRSBox URLs are also allowlisted for citations.
+    osrsbox_enabled: bool = False
+    osrsbox_base_url: str = "https://www.osrsbox.com/osrsbox-db/"
+
+    # Optional: OSRSBox static JSON DB as an additional structured source.
+    # Enable only if you ingest OSRSBox docs into the local RAGStore.
+    osrsbox_enabled: bool = False
+    osrsbox_base_url: str = "https://www.osrsbox.com/osrsbox-db/"
+
     # YouTube Data API v3 (optional) for quest video search.
     youtube_api_key: str | None = Field(
         default=None,

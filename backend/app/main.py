@@ -18,7 +18,7 @@ from .llm.gemini_vertex import GeminiVertexClient
 from .llm.answer_judge import judge_answer_confidence
 from .payments.paypal import PayPalClient
 from .rag.answer_cache import AnswerCacheStore
-from .rag.live_query import live_query_chunks, live_search_web_and_fetch_chunks
+from .rag.live_query import live_query_chunks, live_search_web_and_fetch_chunks, live_search_web_and_scrape_chunks
 from .rag.prompting import build_rag_prompt
 from .rag.query_expansion import derive_search_queries, extract_keywords
 from .rag.quest_registry import find_quest_title_in_text, load_osrs_quest_titles
@@ -155,6 +155,12 @@ async def _chat_impl(
     status_cb: Callable[[str], Awaitable[None]] | None = None,
 ) -> ChatResponse:
     prefixes = allowed_url_prefixes()
+    if settings.osrsbox_enabled:
+        p = (settings.osrsbox_base_url or "").strip()
+        if p and not p.endswith("/"):
+            p += "/"
+        if p and p not in prefixes:
+            prefixes.append(p)
     history_store = get_public_chat_store()
 
     actions: list[str] = []
@@ -225,6 +231,27 @@ async def _chat_impl(
     def _topic_hint_from_text(text: str) -> str:
         t = (text or "").strip()
         if not t:
+            return ""
+
+        # Ignore common meta/instruction messages that are not actual topics.
+        t_l = t.lower().strip()
+        if t_l in {
+            "more",
+            "more info",
+            "more information",
+            "more details",
+            "more answers",
+            "another answer",
+            "another",
+            "continue",
+            "keep going",
+            "expand",
+            "elaborate",
+            "say more",
+            "try again",
+            "search again",
+            "query for more answers",
+        }:
             return ""
 
         # If the message contains a known quest title (even in lowercase), prefer it.
@@ -359,6 +386,61 @@ async def _chat_impl(
             )
         )
 
+    def _is_followup_more_request(message: str) -> bool:
+        """Return True when the user is asking for more detail, not a new topic."""
+        import re
+
+        m = (message or "").strip().lower()
+        if not m:
+            return False
+        if len(m) > 80:
+            return False
+
+        # Normalize punctuation and spacing.
+        m = re.sub(r"[\t\r\n]+", " ", m)
+        m = re.sub(r"\s+", " ", m).strip()
+
+        # Must contain some follow-up indicator.
+        if not any(w in m for w in ("more", "another", "expand", "elaborate", "continue", "again")):
+            return False
+
+        # If the message contains a real topic keyword (beyond generic follow-up words), treat it as a normal query.
+        noise = {
+            "more",
+            "another",
+            "answers",
+            "answer",
+            "detail",
+            "details",
+            "info",
+            "information",
+            "explain",
+            "explanation",
+            "expand",
+            "elaborate",
+            "continue",
+            "again",
+            "please",
+            "pls",
+            "query",
+            "search",
+            "retry",
+            "for",
+            "me",
+            "give",
+            "some",
+            "a",
+            "an",
+            "the",
+            "to",
+        }
+        keys = extract_keywords(m, max_terms=8)
+        meaningful = [k for k in keys if (k or "").strip().lower() not in noise]
+        if meaningful:
+            return False
+
+        return True
+
     await _status("Opening the public logbook of our last words...")
 
     # Pull a small amount of per-session context so follow-ups like "how do I beat her" work.
@@ -386,20 +468,38 @@ async def _chat_impl(
         conversation_context = "\n".join(lines).strip()
 
     prev_user_message = (prior_turns[0].user_message if prior_turns else "") or ""
-    prev_topic_hint = _topic_hint_from_text(prev_user_message)
-    cur_topic_hint = _topic_hint_from_text(req.message)
+    raw_user_message = (req.message or "").strip()
 
-    pronoun_followup = bool(prev_user_message and _needs_pronoun_resolution(req.message))
+    # Interpret short meta prompts like "more answers" as a follow-up on the prior user question.
+    followup_more = bool(prev_user_message and _is_followup_more_request(raw_user_message))
+
+    # Use an effective question for retrieval + prompting.
+    user_message = raw_user_message
+    prompt_user_message = raw_user_message
+    if followup_more:
+        actions.append("Interpreted request as a follow-up; expanding the previous question.")
+        user_message = (prev_user_message or "").strip()
+        prompt_user_message = (
+            f"{user_message}\n\nPlease provide additional detail, alternatives, and practical tips beyond the prior answer."
+        )
+
+    prev_topic_hint = _topic_hint_from_text(prev_user_message)
+    cur_topic_hint = _topic_hint_from_text(user_message)
+
+    pronoun_followup = bool(prev_user_message and _needs_pronoun_resolution(raw_user_message))
 
     # Prefer current explicit topic when present; otherwise fall back to prior turn.
     topic_hint = (cur_topic_hint or prev_topic_hint).strip()
 
-    strategy_followup = bool(topic_hint and _looks_like_strategy_question(req.message))
-    quest_help = bool(topic_hint and _looks_like_quest_help_question(req.message))
+    strategy_followup = bool(topic_hint and _looks_like_strategy_question(user_message))
+    quest_help = bool(topic_hint and _looks_like_quest_help_question(user_message))
 
     # If the user asks for "latest"/"current" info, skip the answer cache.
-    msg_l = (req.message or "").lower()
+    msg_l = (user_message or "").lower()
     force_fresh = any(w in msg_l for w in ("latest", "today", "current", "new", "update"))
+    if followup_more:
+        # Avoid serving the same cached answer; user explicitly asked for more.
+        force_fresh = True
 
     # Context-dependent follow-ups ("her", "that", "it") should not be served from cache.
     if pronoun_followup:
@@ -414,7 +514,7 @@ async def _chat_impl(
     # Fast path: reuse a previously-generated, cited answer for similar questions.
     await _status("Leafing through my old scrolls for a matching answer...")
     cached = None if force_fresh else AnswerCacheStore().find_similar(
-        question=req.message, allowed_url_prefixes=prefixes
+        question=user_message, allowed_url_prefixes=prefixes
     )
     if cached:
         # If the cached answer is explicitly low-confidence, force a fresh retrieval.
@@ -425,7 +525,7 @@ async def _chat_impl(
         videos = []
         try:
             await _status("Peering into the crystal screen for quest videos...")
-            videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+            videos = await quest_youtube_videos_with_summaries(user_message=user_message)
         except Exception:
             videos = []
 
@@ -442,7 +542,7 @@ async def _chat_impl(
 
         history_id = history_store.add(
             session_id=req.session_id,
-            user_message=req.message,
+            user_message=raw_user_message,
             bot_answer=cached.answer,
             sources=[s.model_dump() for s in sources],
             videos=videos,
@@ -458,11 +558,11 @@ async def _chat_impl(
     store = RAGStore()
 
     # For short pronoun follow-ups, augment retrieval with the prior topic.
-    retrieval_seed = req.message
+    retrieval_seed = user_message
     if pronoun_followup and prev_topic_hint:
-        retrieval_seed = f"{req.message} {prev_topic_hint}".strip()
+        retrieval_seed = f"{user_message} {prev_topic_hint}".strip()
     elif pronoun_followup:
-        retrieval_seed = f"{req.message} {prev_user_message}".strip()
+        retrieval_seed = f"{user_message} {prev_user_message}".strip()
 
     # If we can infer a specific boss/topic from the prior turn and the user is
     # asking for tactics, search the boss's /Strategies page first.
@@ -493,7 +593,7 @@ async def _chat_impl(
     # Merge top chunks across a few derived queries.
     chunks = []
     seen_chunk_keys: set[tuple[str, str]] = set()
-    for q in queries or [req.message]:
+    for q in queries or [user_message]:
         for c in store.query(text=q, top_k=5, allowed_url_prefixes=prefixes):
             key = (c.url or "", (c.text or "")[:80])
             if key in seen_chunk_keys:
@@ -632,6 +732,23 @@ async def _chat_impl(
 
             elif web_hits:
                 actions.append("Web search found leads, but I couldn't fetch allowed wiki pages from them.")
+
+                if settings.web_scrape_enabled:
+                    await _status("Those leads are outside the wiki; carefully scraping for clues...")
+                    try:
+                        scraped_chunks, _ = await live_search_web_and_scrape_chunks(
+                            primary_q,
+                            max_results=5,
+                            max_pages=int(settings.web_scrape_max_pages),
+                            max_chunks_total=int(settings.web_scrape_max_chunks_total),
+                            skip_url_prefixes=prefixes,
+                        )
+                    except Exception:
+                        scraped_chunks = []
+
+                    if scraped_chunks:
+                        actions.append("Scraped non-wiki pages returned by CSE (untrusted web).")
+                        chunks = scraped_chunks
             else:
                 actions.append("Web search returned no usable leads (check CSE keys and site restriction).")
 
@@ -658,7 +775,9 @@ async def _chat_impl(
             u = (getattr(c, "url", "") or "").strip()
             if not u:
                 continue
-            if prefixes_t and not u.startswith(prefixes_t):
+            # Normally, keep citations on the configured wiki domains.
+            # If web scraping is enabled, allow external URLs too.
+            if prefixes_t and not u.startswith(prefixes_t) and not bool(settings.web_scrape_enabled):
                 continue
             url_to_chunks.setdefault(u, []).append(c)
 
@@ -734,7 +853,7 @@ async def _chat_impl(
 
         history_id = history_store.add(
             session_id=req.session_id,
-            user_message=req.message,
+            user_message=raw_user_message,
             bot_answer=fallback,
             sources=[],
             videos=videos,
@@ -751,10 +870,11 @@ async def _chat_impl(
 
     await _status("Arranging citations and weaving your answer...")
     prompt = build_rag_prompt(
-        user_message=req.message,
+        user_message=prompt_user_message,
         conversation_context=conversation_context,
         chunks=prompt_chunks,
         allowed_url_prefixes=prefixes,
+        allow_external_sources=bool(settings.web_scrape_enabled),
     )
 
     client = GeminiVertexClient()
@@ -770,7 +890,7 @@ async def _chat_impl(
 
         videos = []
         try:
-            videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+            videos = await quest_youtube_videos_with_summaries(user_message=user_message)
         except Exception:
             videos = []
 
@@ -781,7 +901,7 @@ async def _chat_impl(
             sources.append(SourceChunk(title=c.title, url=c.url, text=c.text[:500]))
         history_id = history_store.add(
             session_id=req.session_id,
-            user_message=req.message,
+            user_message=raw_user_message,
             bot_answer=f"{fallback}\n\nError: {exc}",
             sources=[s.model_dump() for s in sources],
             videos=videos,
@@ -808,7 +928,7 @@ async def _chat_impl(
                 if getattr(c, "url", None)
             ][:6]
             j = judge_answer_confidence(
-                user_message=req.message,
+                user_message=prompt_user_message,
                 answer=res.text or "",
                 sources=judge_sources,
             )
@@ -820,7 +940,7 @@ async def _chat_impl(
                 await _status("My librarian looks doubtful; fetching better sources...")
                 actions.append("Judge flagged low confidence; forced live retrieval/web search.")
 
-                retry_seed = (topic_hint or req.message).strip()
+                retry_seed = (user_message if not pronoun_followup else (topic_hint or user_message)).strip()
                 retry_qs = derive_search_queries(retry_seed) or [retry_seed]
                 retry_primary = retry_qs[0]
 
@@ -838,6 +958,21 @@ async def _chat_impl(
                         )
                     except Exception:
                         web_chunks, web_hits = ([], [])
+
+                    if (not web_chunks) and web_hits and settings.web_scrape_enabled:
+                        try:
+                            scraped_chunks, _ = await live_search_web_and_scrape_chunks(
+                                retry_primary,
+                                max_results=5,
+                                max_pages=int(settings.web_scrape_max_pages),
+                                max_chunks_total=int(settings.web_scrape_max_chunks_total),
+                                skip_url_prefixes=prefixes,
+                            )
+                        except Exception:
+                            scraped_chunks = []
+                        if scraped_chunks:
+                            actions.append("Scraped non-wiki pages returned by CSE (untrusted web).")
+                            web_chunks = scraped_chunks
 
                     web_query = retry_primary
                     if web_hits:
@@ -861,10 +996,11 @@ async def _chat_impl(
                 )
                 if retry_prompt_chunks:
                     retry_prompt = build_rag_prompt(
-                        user_message=req.message,
+                        user_message=prompt_user_message,
                         conversation_context=conversation_context,
                         chunks=retry_prompt_chunks,
                         allowed_url_prefixes=prefixes,
+                        allow_external_sources=bool(settings.web_scrape_enabled),
                     )
                     res = client.generate(retry_prompt)
                     prompt_chunks = retry_prompt_chunks
@@ -879,7 +1015,7 @@ async def _chat_impl(
         try:
             await _status("That answer felt uncertain; double-checking the wiki...")
             actions.append("Answer looked uncertain; re-queried the wiki for better sources.")
-            retry_seed = (topic_hint or req.message).strip()
+            retry_seed = (user_message if not pronoun_followup else (topic_hint or user_message)).strip()
             retry_qs = derive_search_queries(retry_seed) or [retry_seed]
             retry_primary = retry_qs[0]
             retry_chunks = await live_query_chunks(retry_primary, allowed_url_prefixes=prefixes)
@@ -891,10 +1027,11 @@ async def _chat_impl(
             )
             if retry_prompt_chunks:
                 retry_prompt = build_rag_prompt(
-                    user_message=req.message,
+                    user_message=prompt_user_message,
                     conversation_context=conversation_context,
                     chunks=retry_prompt_chunks,
                     allowed_url_prefixes=prefixes,
+                    allow_external_sources=bool(settings.web_scrape_enabled),
                 )
                 res = client.generate(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
@@ -961,7 +1098,7 @@ async def _chat_impl(
         try:
             if (not _is_low_confidence_answer(res.text or "")) and _has_source_citations(res.text or ""):
                 AnswerCacheStore().add(
-                    question=req.message,
+                    question=user_message,
                     answer=res.text,
                     sources=[s.model_dump() for s in sources],
                 )
@@ -972,7 +1109,7 @@ async def _chat_impl(
     videos = []
     try:
         await _status("Scrying the crystal screen for quest videos...")
-        videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+        videos = await quest_youtube_videos_with_summaries(user_message=user_message)
         if videos:
             actions.append("Found quest videos and summarized them.")
     except Exception:
@@ -980,7 +1117,7 @@ async def _chat_impl(
 
     history_id = history_store.add(
         session_id=req.session_id,
-        user_message=req.message,
+        user_message=raw_user_message,
         bot_answer=res.text,
         sources=[s.model_dump() for s in sources],
         videos=videos,

@@ -18,8 +18,10 @@ def build_rag_prompt(
     conversation_context: str | None = None,
     chunks: list[RetrievedChunk],
     allowed_url_prefixes: list[str] | None = None,
+    allow_external_sources: bool = False,
 ) -> str:
-    chunks = _filter_allowed(chunks, allowed_url_prefixes)
+    if not allow_external_sources:
+        chunks = _filter_allowed(chunks, allowed_url_prefixes)
     context_lines: list[str] = []
     for i, ch in enumerate(chunks, start=1):
         title = ch.title or "(untitled)"
@@ -47,6 +49,7 @@ def build_rag_prompt(
         "Use the conversation context (if provided) to resolve follow-up questions and pronouns across turns. "
         "Use the provided sources when answering, but ONLY if they are relevant to the user's question. "
         "If the sources do not contain the answer OR look unrelated, say you don't know based on the sources. "
+        "Some sources may be from the wider web (non-wiki) and can be noisy; treat them as less authoritative than the OSRS Wiki. "
         "Do not output long verbatim excerpts; paraphrase in your own words. "
         "When you use a source, cite it like [Source 1], [Source 2]. "
         "Only cite source numbers that exist in the SOURCES list below; never cite [Source 7] if there is no Source 7.\n\n"

@@ -10,6 +10,7 @@ from .ingest_mediawiki import mediawiki_search, mediawiki_fetch_plaintext
 from .google_cse import SearchResult, google_cse_search, url_to_title
 from .query_expansion import extract_keywords
 from .store import RetrievedChunk
+from .web_scrape import fetch_and_extract_page, chunk_text, is_safe_public_url
 
 
 def _norm(s: str) -> str:
@@ -294,15 +295,45 @@ async def live_search_web_and_fetch_chunks(
     # Map allowed prefixes -> MediaWiki API
     prefix_to_api: list[tuple[str, str]] = []
     for s in sources:
+        if not s.mediawiki_api:
+            continue
         for p in (s.allowed_url_prefixes or []):
             prefix_to_api.append((p, s.mediawiki_api))
 
     results = await google_cse_search(api_key=api_key, cx=cx, query=query, num=max_results)
-    urls = [r.url for r in results if r.url]
+
+    # Filter to allowed domains (we only fetch via MediaWiki APIs).
+    filtered_results = [r for r in results if getattr(r, "url", None)]
     if prefixes:
-        urls = [u for u in urls if u.startswith(prefixes)]
-    if not urls:
+        filtered_results = [r for r in filtered_results if str(r.url).startswith(prefixes)]
+    if not filtered_results:
         return ([], results)
+
+    # Rank hits so we traverse the most relevant pages first.
+    # Without this, an early generic quest page can consume the chunk budget and we
+    # never fetch later, more specific pages (e.g., a boss/NPC page).
+    terms = extract_keywords(query, max_terms=10)
+
+    def _hit_score(r: SearchResult) -> int:
+        title = (r.title or "")
+        snippet = (r.snippet or "")
+        url = (r.url or "")
+        mw_title = url_to_title(url) or ""
+
+        hay = "\n".join([title, mw_title, snippet]).lower()
+        score = sum(1 for t in (terms or []) if t and t.lower() in hay)
+
+        # Prefer pages where we can confidently extract a MediaWiki title.
+        if mw_title:
+            score += 2
+
+        # Small boost for exact-ish title hint matches.
+        hint = _query_title_hint(query)
+        if hint and mw_title and _norm(mw_title) == _norm(hint):
+            score += 10
+        return score
+
+    ranked_results = sorted(filtered_results, key=_hit_score, reverse=True)
 
     out: list[RetrievedChunk] = []
     seen_url: set[str] = set()
@@ -311,7 +342,12 @@ async def live_search_web_and_fetch_chunks(
     combat_intent = any(w in ql for w in ("strateg", "beat", "defeat", "kill", "boss", "gear", "prayer", "phase"))
     quest_intent = any(w in ql for w in ("quest", "walkthrough", "quick guide", "requirements", "reqs", "steps"))
 
-    for url in urls:
+    # Fetch a small number of chunks per page so we cover more distinct pages
+    # before hitting max_chunks_total.
+    max_chunks_per_page = 2
+
+    for r in ranked_results:
+        url = str(r.url)
         if url in seen_url:
             continue
         seen_url.add(url)
@@ -352,7 +388,7 @@ async def live_search_web_and_fetch_chunks(
         if prefixes and page.url and not page.url.startswith(prefixes):
             continue
 
-        page_chunks = _select_best_page_chunks(chunk_page(page), query=query, max_chunks=3)
+        page_chunks = _select_best_page_chunks(chunk_page(page), query=query, max_chunks=max_chunks_per_page)
         for text, meta in page_chunks:
             out.append(
                 RetrievedChunk(
@@ -365,3 +401,73 @@ async def live_search_web_and_fetch_chunks(
                 return (out[:max_chunks_total], results)
 
     return (out[:max_chunks_total], results)
+
+
+async def live_search_web_and_scrape_chunks(
+    query: str,
+    *,
+    max_results: int = 5,
+    max_pages: int = 3,
+    max_chunks_total: int = 6,
+    skip_url_prefixes: list[str] | None = None,
+) -> tuple[list[RetrievedChunk], list[SearchResult]]:
+    """Live search via Google PSE, then scrape non-wiki pages for text chunks.
+
+    This is optional "untrusted web" retrieval.
+    """
+
+    api_key = settings.google_cse_api_key
+    cx = settings.google_cse_cx
+    if not api_key or not cx:
+        return ([], [])
+
+    results = await google_cse_search(api_key=api_key, cx=cx, query=query, num=max_results)
+
+    prefixes_t = tuple(p for p in (skip_url_prefixes or []) if p)
+
+    # Rank hits by basic keyword overlap so we scrape the likeliest pages first.
+    terms = extract_keywords(query, max_terms=10)
+
+    def _score(r: SearchResult) -> int:
+        hay = "\n".join([(r.title or ""), (r.snippet or ""), (r.url or "")]).lower()
+        return sum(1 for t in (terms or []) if t and t.lower() in hay)
+
+    ranked = sorted([r for r in results if getattr(r, "url", None)], key=_score, reverse=True)
+
+    out: list[RetrievedChunk] = []
+    seen: set[str] = set()
+
+    max_pages = max(1, int(max_pages))
+    scraped_pages = 0
+
+    for r in ranked:
+        url = str(r.url)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+
+        if prefixes_t and url.startswith(prefixes_t):
+            continue
+        if not is_safe_public_url(url):
+            continue
+
+        page = await fetch_and_extract_page(url, timeout_s=float(settings.web_scrape_timeout_s), max_bytes=int(settings.web_scrape_max_bytes))
+        if not page:
+            continue
+
+        scraped_pages += 1
+
+        title = page.title or (r.title or "(web page)")
+        # Mark as web so the model/user understands it isn't the wiki.
+        title = f"[Web] {str(title)[:180]}"
+
+        chunks = chunk_text(page.text, max_chars=900, overlap=120)
+        for ch in chunks[:2]:
+            out.append(RetrievedChunk(text=ch, url=page.url, title=title))
+            if len(out) >= int(max_chunks_total):
+                return (out[: int(max_chunks_total)], results)
+
+        if scraped_pages >= max_pages:
+            break
+
+    return (out[: int(max_chunks_total)], results)
