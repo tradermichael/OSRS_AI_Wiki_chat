@@ -855,6 +855,10 @@ function initVoiceChat() {
   };
 
   const stopEvt = (e) => {
+    // Important: do NOT preventDefault unless we're actually talking.
+    // Otherwise, a global mouseup/touchend handler can block normal clicks/focus
+    // and make the whole app feel "frozen".
+    if (!talking) return;
     e.preventDefault();
     stopTalking();
   };
