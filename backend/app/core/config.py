@@ -1,7 +1,20 @@
 from __future__ import annotations
 
+import os
+
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _running_on_cloud_run() -> bool:
+    # Cloud Run services always set K_SERVICE; jobs may set CLOUD_RUN_JOB.
+    return bool(os.getenv("K_SERVICE") or os.getenv("CLOUD_RUN_JOB"))
+
+
+def _default_persistence_backend() -> str:
+    # Cloud Run instances have an ephemeral filesystem, so SQLite-backed storage will
+    # reset across revisions/instances. Default to Firestore when running on Cloud Run.
+    return "firestore" if _running_on_cloud_run() else "sqlite"
 
 
 class Settings(BaseSettings):
@@ -11,7 +24,10 @@ class Settings(BaseSettings):
     app_host: str = "0.0.0.0"
     app_port: int = 8000
 
-    google_cloud_project: str | None = None
+    google_cloud_project: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GOOGLE_CLOUD_PROJECT", "GCP_PROJECT_ID"),
+    )
     vertex_location: str = "us-central1"
     gemini_model: str = "gemini-2.5-flash"
 
@@ -46,7 +62,7 @@ class Settings(BaseSettings):
     # Gold persistence backend.
     # sqlite: local file (ephemeral on Cloud Run)
     # firestore: persistent in GCP Firestore
-    gold_backend: str = "sqlite"  # sqlite|firestore
+    gold_backend: str = Field(default_factory=_default_persistence_backend)  # sqlite|firestore
 
     # Public chat history log storage. Defaults to RAG_DB_PATH if not set.
     history_db_path: str | None = None
@@ -54,7 +70,7 @@ class Settings(BaseSettings):
     # Public history persistence backend.
     # sqlite: local file (ephemeral on Cloud Run)
     # firestore: persistent in GCP Firestore
-    history_backend: str = "sqlite"  # sqlite|firestore
+    history_backend: str = Field(default_factory=_default_persistence_backend)  # sqlite|firestore
     firestore_collection: str = "public_chat"
 
     # Firestore site-state storage (used for global gold total).

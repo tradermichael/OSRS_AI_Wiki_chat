@@ -14,7 +14,7 @@ Write-Host "Setting project to $ProjectId"
 gcloud config set project $ProjectId
 
 Write-Host "Enabling required APIs"
-gcloud services enable run.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
+gcloud services enable run.googleapis.com artifactregistry.googleapis.com aiplatform.googleapis.com firestore.googleapis.com datastore.googleapis.com iamcredentials.googleapis.com sts.googleapis.com
 
 Write-Host "Creating Artifact Registry repo (if missing)"
 gcloud artifacts repositories describe $ArtifactRepo --location $Region | Out-Null
@@ -52,6 +52,9 @@ foreach ($role in $roles) {
 
 Write-Host "Granting runtime permissions (Vertex AI)"
 gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$RuntimeSaEmail" --role roles/aiplatform.user | Out-Null
+
+Write-Host "Granting runtime permissions (Firestore)"
+gcloud projects add-iam-policy-binding $ProjectId --member "serviceAccount:$RuntimeSaEmail" --role roles/datastore.user | Out-Null
 
 Write-Host "Creating Workload Identity Pool + Provider"
 $poolId = "$ServiceName-pool"

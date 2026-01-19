@@ -26,6 +26,17 @@ GCP_YT_API_KEY=
 HISTORY_BACKEND=firestore
 FIRESTORE_COLLECTION=public_chat
 
+# Gold ("GP") total persistence
+GOLD_BACKEND=firestore
+# Optional overrides:
+# FIRESTORE_SITE_COLLECTION=site_state
+# FIRESTORE_GOLD_DOC=gold_total
+
+# NOTE:
+# - The app reads GOOGLE_CLOUD_PROJECT at runtime. The deploy workflow maps the GitHub
+#   secret GCP_PROJECT_ID -> Cloud Run env var GOOGLE_CLOUD_PROJECT.
+# - If deploying manually (not via the workflow), set GOOGLE_CLOUD_PROJECT yourself.
+
 PAYPAL_ENV=sandbox
 PAYPAL_CLIENT_ID=
 PAYPAL_CLIENT_SECRET=

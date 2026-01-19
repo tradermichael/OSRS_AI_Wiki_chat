@@ -49,8 +49,11 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           # Default to the current supported model if not configured as a secret
-          GEMINI_MODEL_VALUE="${{ secrets.GEMINI_MODEL || 'gemini-2.5-flash' }}"
-          VERTEX_LOCATION_VALUE="${{ secrets.GCP_VERTEX_LOCATION || 'us-central1' }}"
+          GEMINI_MODEL_VALUE="${{ secrets.GEMINI_MODEL }}"
+          if [ -z "$GEMINI_MODEL_VALUE" ]; then GEMINI_MODEL_VALUE="gemini-2.5-flash"; fi
+
+          VERTEX_LOCATION_VALUE="${{ secrets.GCP_VERTEX_LOCATION }}"
+          if [ -z "$VERTEX_LOCATION_VALUE" ]; then VERTEX_LOCATION_VALUE="us-central1"; fi
 
           # Guard against accidental trailing newlines in GitHub Secrets
           PROJECT_ID_VALUE="$(printf '%s' "${{ secrets.GCP_PROJECT_ID }}" | tr -d '\r\n')"
@@ -69,6 +72,8 @@ jobs:
             --set-env-vars "GOOGLE_CSE_API_KEY=${GOOGLE_CSE_API_KEY_VALUE}" \
             --set-env-vars "GOOGLE_CSE_CX=${GOOGLE_CSE_CX_VALUE}" \
             --set-env-vars "YOUTUBE_API_KEY=${YOUTUBE_API_KEY_VALUE}" \
+            --set-env-vars "HISTORY_BACKEND=firestore,FIRESTORE_COLLECTION=public_chat" \
+            --set-env-vars "GOLD_BACKEND=firestore,FIRESTORE_SITE_COLLECTION=site_state,FIRESTORE_GOLD_DOC=gold_total" \
             --set-env-vars "PAYPAL_ENV=${{ secrets.PAYPAL_ENV }}" \
             --set-env-vars "PAYPAL_CLIENT_ID=${{ secrets.PAYPAL_CLIENT_ID }}" \
             --set-env-vars "PAYPAL_CLIENT_SECRET=${{ secrets.PAYPAL_CLIENT_SECRET }}" \

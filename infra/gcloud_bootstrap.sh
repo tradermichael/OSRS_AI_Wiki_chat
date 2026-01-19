@@ -15,6 +15,8 @@ gcloud services enable \
   run.googleapis.com \
   artifactregistry.googleapis.com \
   aiplatform.googleapis.com \
+  firestore.googleapis.com \
+  datastore.googleapis.com \
   iamcredentials.googleapis.com \
   sts.googleapis.com
 
@@ -48,6 +50,10 @@ done
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member "serviceAccount:$RUNTIME_SA_EMAIL" \
   --role roles/aiplatform.user >/dev/null
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member "serviceAccount:$RUNTIME_SA_EMAIL" \
+  --role roles/datastore.user >/dev/null
 
 POOL_ID="$SERVICE_NAME-pool"
 PROVIDER_ID="$SERVICE_NAME-provider"
