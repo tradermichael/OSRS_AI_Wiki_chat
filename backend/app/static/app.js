@@ -592,12 +592,16 @@ function initVoiceChat() {
   let ws = null;
   let connecting = false;
   let talking = false;
+  let liveReady = false;
+  let lastWsError = '';
   let inputTx = '';
 
   let micStream = null;
   let micCtx = null;
   let micSource = null;
   let micProc = null;
+  let micWorklet = null;
+  let micSilentGain = null;
 
   let playCtx = null;
   let playHead = 0;
@@ -642,6 +646,8 @@ function initVoiceChat() {
   async function connect() {
     if (ws || connecting) return;
     connecting = true;
+    liveReady = false;
+    lastWsError = '';
     setVoiceChatState('Connecting…');
     pushToTalkBtn.disabled = true;
 
@@ -650,8 +656,8 @@ function initVoiceChat() {
 
     ws.addEventListener('open', () => {
       connecting = false;
-      setVoiceChatState('Connected. Hold to talk.');
-      pushToTalkBtn.disabled = false;
+      // Wait for server 'ready' before enabling audio streaming.
+      setVoiceChatState('Connected. Starting session…');
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = false;
       try { ws.send(JSON.stringify({ type: 'start' })); } catch { /* ignore */ }
     });
@@ -662,12 +668,15 @@ function initVoiceChat() {
       if (!msg || !msg.type) return;
 
       if (msg.type === 'ready') {
+        liveReady = true;
         setVoiceChatState('Connected. Hold to talk.');
+        pushToTalkBtn.disabled = false;
         return;
       }
 
       if (msg.type === 'error') {
-        setVoiceChatState(msg.detail || 'Voice chat error');
+        lastWsError = String(msg.detail || 'Voice chat error');
+        setVoiceChatState(lastWsError);
         return;
       }
 
@@ -744,14 +753,28 @@ function initVoiceChat() {
       }
     });
 
-    ws.addEventListener('close', () => {
+    ws.addEventListener('close', (evt) => {
       ws = null;
       connecting = false;
       talking = false;
+      liveReady = false;
       pushToTalkBtn.disabled = true;
       pushToTalkBtn.classList.remove('is-talking');
       pushToTalkBtn.textContent = 'Hold to talk';
-      setVoiceChatState('Disconnected.');
+      const code = evt && typeof evt.code === 'number' ? evt.code : null;
+      const reason = evt && evt.reason ? String(evt.reason) : '';
+      let msg = lastWsError ? `Disconnected: ${lastWsError}` : 'Disconnected.';
+      if (!lastWsError && code) {
+        if (code === 1008) {
+          msg = 'Disconnected (1008 policy). Check GOOGLE_CLOUD_PROJECT + server ADC credentials.';
+        } else if (code === 1003) {
+          msg = 'Disconnected (1003). Protocol error (start message / audio order).';
+        } else {
+          msg = `Disconnected (${code}).`;
+        }
+      }
+      if (reason && !lastWsError) msg += ` ${reason}`;
+      setVoiceChatState(msg);
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = true;
       stopPlayback();
       resetBotTurn();
@@ -772,14 +795,66 @@ function initVoiceChat() {
 
   async function setupMicIfNeeded() {
     if (micStream && micCtx && micProc && micSource) return;
+    if (micStream && micCtx && micWorklet && micSource) return;
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     micCtx = new (window.AudioContext || window.webkitAudioContext)();
     micSource = micCtx.createMediaStreamSource(micStream);
+
+    // Prefer AudioWorklet when available (avoids ScriptProcessor deprecation warnings).
+    if (micCtx.audioWorklet && typeof window.AudioWorkletNode !== 'undefined') {
+      try {
+        await micCtx.audioWorklet.addModule('/static/ptt_worklet.js');
+        micSilentGain = micCtx.createGain();
+        micSilentGain.gain.value = 0;
+
+        micWorklet = new AudioWorkletNode(micCtx, 'ptt-capture', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          channelCount: 1,
+          channelCountMode: 'explicit',
+          channelInterpretation: 'speakers',
+        });
+
+        micWorklet.port.onmessage = (evt) => {
+          if (!talking) return;
+          if (!liveReady) return;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+          const buf = evt && evt.data ? evt.data : null;
+          if (!buf) return;
+          let f32 = null;
+          try {
+            if (buf instanceof Float32Array) f32 = buf;
+            else if (buf.buffer) f32 = new Float32Array(buf.buffer);
+            else if (buf instanceof ArrayBuffer) f32 = new Float32Array(buf);
+          } catch {
+            f32 = null;
+          }
+          if (!f32 || !f32.length) return;
+
+          const pcm = downsampleFloat32ToInt16(f32, micCtx.sampleRate, 16000);
+          if (!pcm || !pcm.length) return;
+          try { ws.send(pcm.buffer); } catch { /* ignore */ }
+        };
+
+        micSource.connect(micWorklet);
+        micWorklet.connect(micSilentGain);
+        micSilentGain.connect(micCtx.destination);
+        return;
+      } catch {
+        // Fall back to ScriptProcessor below.
+        try { if (micWorklet) micWorklet.disconnect(); } catch { /* ignore */ }
+        try { if (micSilentGain) micSilentGain.disconnect(); } catch { /* ignore */ }
+        micWorklet = null;
+        micSilentGain = null;
+      }
+    }
 
     // ScriptProcessorNode is deprecated but broadly supported and sufficient here.
     micProc = micCtx.createScriptProcessor(2048, 1, 1);
     micProc.onaudioprocess = (e) => {
       if (!talking) return;
+      if (!liveReady) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const ch0 = e.inputBuffer.getChannelData(0);
       const pcm = downsampleFloat32ToInt16(ch0, micCtx.sampleRate, 16000);
@@ -798,12 +873,16 @@ function initVoiceChat() {
 
   function cleanupMic() {
     try { if (micProc) micProc.disconnect(); } catch { /* ignore */ }
+    try { if (micWorklet) micWorklet.disconnect(); } catch { /* ignore */ }
+    try { if (micSilentGain) micSilentGain.disconnect(); } catch { /* ignore */ }
     try { if (micSource) micSource.disconnect(); } catch { /* ignore */ }
     try {
       if (micStream) micStream.getTracks().forEach((t) => t.stop());
     } catch { /* ignore */ }
     try { if (micCtx) micCtx.close(); } catch { /* ignore */ }
     micProc = null;
+    micWorklet = null;
+    micSilentGain = null;
     micSource = null;
     micStream = null;
     micCtx = null;

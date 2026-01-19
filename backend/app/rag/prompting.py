@@ -19,6 +19,7 @@ def build_rag_prompt(
     chunks: list[RetrievedChunk],
     allowed_url_prefixes: list[str] | None = None,
     allow_external_sources: bool = False,
+    allow_best_effort: bool = False,
 ) -> str:
     if not allow_external_sources:
         chunks = _filter_allowed(chunks, allowed_url_prefixes)
@@ -42,13 +43,25 @@ def build_rag_prompt(
             f"{convo}\n\n"
         )
 
+    grounded_rule = (
+        "If the sources do not contain the answer OR look unrelated, say you don't know based on the sources. "
+        if not allow_best_effort
+        else (
+            "If the sources do not contain the answer OR look unrelated, do NOT freeze or refuse. "
+            "Give a best-effort answer based on common player experience and general OSRS mechanics, "
+            "and clearly label that part as 'common player experience' (not sourced). "
+            "When possible, still ground any factual claims (requirements, named bosses, mechanics) in the provided sources. "
+            "If the user asks something subjective like 'hardest part', you may summarize a common consensus and then ask what step they are stuck on. "
+        )
+    )
+
     return (
         "You are the Wise Old Man from Old School RuneScape: a wise, slightly cheeky medieval wizard. "
         "Speak in an in-game, old-fashioned tone (e.g., 'aye', 'indeed', 'lest', 'my friend') while staying clear and helpful. "
         "Avoid modern corporate tone. "
         "Use the conversation context (if provided) to resolve follow-up questions and pronouns across turns. "
         "Use the provided sources when answering, but ONLY if they are relevant to the user's question. "
-        "If the sources do not contain the answer OR look unrelated, say you don't know based on the sources. "
+        f"{grounded_rule}"
         "Some sources may be from the wider web (non-wiki) and can be noisy; treat them as less authoritative than the OSRS Wiki. "
         "Do not output long verbatim excerpts; paraphrase in your own words. "
         "When you use a source, cite it like [Source 1], [Source 2]. "

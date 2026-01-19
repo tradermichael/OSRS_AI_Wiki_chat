@@ -927,8 +927,12 @@ async def _chat_impl(
     strategy_followup = bool(topic_hint and _looks_like_strategy_question(user_message))
     quest_help = bool(topic_hint and _looks_like_quest_help_question(user_message))
 
-    # If the user asks for "latest"/"current" info, skip the answer cache.
+    # Difficulty/"hardest part" questions are often hybrid: part community consensus, part practical help.
+    # Treat them as opinion/community even if an intent classifier leans "gameplay".
     msg_l = (user_message or "").lower()
+    difficulty_question = any(w in msg_l for w in ("hardest", "most difficult", "difficulty", "hard part", "hardest part"))
+
+    # If the user asks for "latest"/"current" info, skip the answer cache.
     force_fresh = any(w in msg_l for w in ("latest", "today", "current", "new", "update"))
     if followup_more:
         # Avoid serving the same cached answer; user explicitly asked for more.
@@ -940,10 +944,12 @@ async def _chat_impl(
     if llm_intent is True:
         opinion_question = True
         actions.append("LLM judged this as a community/opinion question.")
-    elif llm_intent is False and opinion_question:
+    elif llm_intent is False and opinion_question and not difficulty_question:
         # If heuristic fired but LLM is confident it's factual/gameplay, prefer gameplay behavior.
         opinion_question = False
         actions.append("LLM judged this as a gameplay/factual question.")
+    elif llm_intent is False and opinion_question and difficulty_question:
+        actions.append("Detected a difficulty/\"hardest part\" question; treating as hybrid community + how-to.")
     if opinion_question:
         # Cached answers tend to overfit generic overlaps (e.g., "quest") on opinion prompts.
         force_fresh = True
@@ -1019,14 +1025,31 @@ async def _chat_impl(
     queries = derive_search_queries(retrieval_seed)
 
     def _primary_live_query(*, raw: str, topic_hint: str, queries: list[str], fallback: str) -> str:
-        # For live retrieval (MediaWiki + CSE), prefer an explicit topic hint or the user's raw phrasing.
-        # This avoids over-aggressive keyword stripping producing bad queries like "waht song elves".
+        # For live retrieval (MediaWiki + CSE), we want a query that is specific enough to find the
+        # right *subpage* (e.g., boss/strategies) rather than always searching the bare quest title.
         th = (topic_hint or "").strip()
+        raw_q = (raw or "").strip()
+
+        # If we've explicitly boosted derived queries (strategies, walkthrough, etc.), prefer those.
+        if (strategy_followup or quest_help or opinion_question or difficulty_question) and (queries or []):
+            for q in (queries or []):
+                qq = (q or "").strip()
+                if not qq:
+                    continue
+                if th and qq.lower() == th.lower():
+                    continue
+                # Prefer subpages and explicit modifiers.
+                if "/" in qq or any(w in qq.lower() for w in ("strateg", "walkthrough", "quick guide", "boss", "fight", "hardest")):
+                    return qq
+
+        # If the user asked a richer question than just the topic title, prefer their raw phrasing.
+        if raw_q and th and raw_q.lower() != th.lower() and len(raw_q) >= (len(th) + 6):
+            return raw_q
+
         if th:
             return th
-        r = (raw or "").strip()
-        if r and len(r) >= 8:
-            return r
+        if raw_q and len(raw_q) >= 8:
+            return raw_q
         # Otherwise prefer the longest derived query (usually the least lossy).
         best = ""
         for q in (queries or []):
@@ -1034,6 +1057,26 @@ async def _chat_impl(
             if len(qq) > len(best):
                 best = qq
         return best or (fallback or "").strip()
+
+    if difficulty_question and topic_hint:
+        # Boost likely relevant subpages for "hardest" questions so we pull tactics pages instead of
+        # just the quest overview.
+        boosted = [
+            f"{topic_hint} boss",
+            f"{topic_hint} final boss",
+            f"{topic_hint} fight",
+            f"{topic_hint} hardest part",
+            f"{topic_hint} tips",
+        ]
+        # A few high-impact quest -> boss mappings (kept small on purpose).
+        boss_map = {
+            "Song of the Elves": ["Fragment of Seren", "Fragment of Seren/Strategies"],
+        }
+        for extra in boss_map.get(topic_hint, []):
+            boosted.insert(0, extra)
+        for q in reversed(boosted):
+            if q and q.lower() not in {x.lower() for x in queries}:
+                queries.insert(0, q)
     if strategy_followup:
         strat = f"{topic_hint}/Strategies"
         boosted = [strat, f"{topic_hint} strategies", topic_hint]
@@ -1759,7 +1802,13 @@ async def _chat_impl(
 
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
-        if bool(settings.web_scrape_enabled) or (web_results and len(web_results) > 0):
+        if opinion_question or difficulty_question:
+            fallback = (
+                "I couldn't fetch citable pages for that just now, my friend — but I can still help. "
+                "When players ask for the 'hardest part' of a quest, it's often subjective, and the best answer depends on what step you're stuck on. "
+                "Tell me which step/room/boss you're at (or what the game message says), and what your stats/gear are, and I'll give a practical plan."
+            )
+        elif bool(settings.web_scrape_enabled) or (web_results and len(web_results) > 0):
             fallback = (
                 "I couldn't fetch any citable sources for that question just now (wiki or community). "
                 "Please try rephrasing your question or ask about a different topic."
@@ -1802,6 +1851,7 @@ async def _chat_impl(
         chunks=prompt_chunks,
         allowed_url_prefixes=prefixes,
         allow_external_sources=bool(allow_external_sources),
+        allow_best_effort=bool(opinion_question or difficulty_question),
     )
 
     client = GeminiVertexClient()
@@ -1932,6 +1982,7 @@ async def _chat_impl(
                         chunks=retry_prompt_chunks,
                         allowed_url_prefixes=prefixes,
                         allow_external_sources=bool(allow_external_sources),
+                        allow_best_effort=bool(opinion_question or difficulty_question),
                     )
                     res = client.generate(retry_prompt)
                     prompt_chunks = retry_prompt_chunks
@@ -1965,6 +2016,7 @@ async def _chat_impl(
                     chunks=retry_prompt_chunks,
                     allowed_url_prefixes=prefixes,
                     allow_external_sources=bool(allow_external_sources),
+                    allow_best_effort=bool(opinion_question or difficulty_question),
                 )
                 res = client.generate(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
@@ -2006,6 +2058,7 @@ async def _chat_impl(
                                 chunks=focus_prompt_chunks,
                                 allowed_url_prefixes=prefixes,
                                 allow_external_sources=bool(allow_external_sources),
+                                allow_best_effort=bool(opinion_question or difficulty_question),
                             )
                             res = client.generate(focus_prompt)
                             prompt_chunks = focus_prompt_chunks
