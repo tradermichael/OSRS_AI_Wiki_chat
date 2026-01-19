@@ -43,7 +43,49 @@ def build_osrs_quest_guide_query(user_message: str) -> str:
         return ""
     if "quest" not in q.lower():
         q = f"{q} quest"
-    return f"osrs {q} guide"
+    # Bias strongly toward OSRS results (and away from RS3) at query time.
+    return f"osrs \"old school runescape\" {q} guide"
+
+
+_OSRS_POSITIVE_MARKERS = (
+    "osrs",
+    "old school runescape",
+    "oldschool runescape",
+    "old school rs",
+    "oldschool rs",
+    "07scape",
+)
+
+
+_OSRS_NEGATIVE_MARKERS = (
+    "rs3",
+    "runescape 3",
+    "rune scape 3",
+    "eoc",
+)
+
+
+def _is_osrs_relevant(video: YouTubeVideo) -> bool:
+    """Strict relevance filter.
+
+    YouTube search can return loosely-related results even with an OSRS-biased query.
+    This filter ensures we only return videos that are very likely about OSRS.
+    """
+
+    haystack = " ".join(
+        [
+            (video.title or ""),
+            (video.channel or ""),
+            (video.description or ""),
+        ]
+    ).lower()
+
+    if any(bad in haystack for bad in _OSRS_NEGATIVE_MARKERS):
+        return False
+
+    # Require an explicit OSRS marker. This is intentionally strict to prevent
+    # showing unrelated videos in the UI.
+    return any(good in haystack for good in _OSRS_POSITIVE_MARKERS)
 
 
 def _normalize_query(message: str) -> str:
@@ -60,6 +102,8 @@ async def youtube_search_videos(*, api_key: str, query: str, max_results: int = 
         "part": "snippet",
         "q": q,
         "type": "video",
+        # Gaming category to reduce unrelated results.
+        "videoCategoryId": "20",
         "maxResults": str(max(1, min(int(max_results), 10))),
         "safeSearch": "moderate",
         "relevanceLanguage": "en",
@@ -122,11 +166,14 @@ async def maybe_get_quest_videos(*, user_message: str) -> list[YouTubeVideo]:
     if not q:
         return []
 
-    return await youtube_search_videos(
+    videos = await youtube_search_videos(
         api_key=api_key,
         query=q,
         max_results=settings.youtube_max_results,
     )
+
+    # Keep YouTube results OSRS-only.
+    return [v for v in videos if _is_osrs_relevant(v)]
 
 
 def _extract_json_array(text: str) -> list | None:
@@ -175,6 +222,7 @@ async def quest_youtube_videos_with_summaries(*, user_message: str) -> list[dict
         query=build_osrs_quest_guide_query(user_message),
         max_results=settings.youtube_max_results,
     )
+    videos = [v for v in videos if _is_osrs_relevant(v)]
     if not videos:
         return []
 
