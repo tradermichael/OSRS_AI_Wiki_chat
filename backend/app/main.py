@@ -41,6 +41,8 @@ from .schemas import (
     PublicHistoryItem,
     PublicHistoryListResponse,
     SourceChunk,
+    VideoItem,
+    WebSearchResult,
 )
 
 app = FastAPI(title="OSRS AI Wiki Chat")
@@ -165,7 +167,7 @@ async def _chat_impl(
 
     actions: list[str] = []
     web_query: str | None = None
-    web_results: list[dict] = []
+    web_results: list[WebSearchResult] = []
 
     async def _status(msg: str) -> None:
         if status_cb:
@@ -267,6 +269,21 @@ async def _chat_impl(
             "what does reddit",
             "what does the community",
             "what do people think",
+            "what do most people",
+            "what do people usually",
+            "what do players usually",
+            "most people",
+            "most common",
+            "commonly",
+            "popular",
+            "generally",
+            "usually",
+            "consensus",
+            "what quest do people",
+            "last quest",
+            "final quest",
+            "leave for last",
+            "leave until last",
             "opinions",
             "opinion",
         )
@@ -573,11 +590,13 @@ async def _chat_impl(
     if cached:
         actions.append("Returned a previously-prepared scroll (with citations).")
         videos = []
-        try:
-            await _status("Peering into the crystal screen for quest videos...")
-            videos = await quest_youtube_videos_with_summaries(user_message=user_message)
-        except Exception:
-            videos = []
+        if quest_help:
+            try:
+                await _status("Peering into the crystal screen for quest videos...")
+                raw_videos = await quest_youtube_videos_with_summaries(user_message=user_message)
+                videos = [VideoItem.model_validate(v) for v in (raw_videos or [])]
+            except Exception:
+                videos = []
 
         sources = [
             SourceChunk(
@@ -595,7 +614,7 @@ async def _chat_impl(
             user_message=raw_user_message,
             bot_answer=cached.answer,
             sources=[s.model_dump() for s in sources],
-            videos=videos,
+            videos=[v.model_dump() for v in videos],
         )
         return ChatResponse(
             answer=cached.answer,
@@ -775,11 +794,11 @@ async def _chat_impl(
             web_query = primary_q
             if web_hits:
                 web_results = [
-                    {
-                        "title": str((r.title or "")[:120]),
-                        "url": str(r.url),
-                        "snippet": (str(r.snippet)[:240] if r.snippet else None),
-                    }
+                    WebSearchResult(
+                        title=str((r.title or "")[:120]),
+                        url=str(r.url),
+                        snippet=(str(r.snippet)[:240] if r.snippet else None),
+                    )
                     for r in (web_hits or [])
                     if getattr(r, "url", None)
                 ][:5]
@@ -830,25 +849,64 @@ async def _chat_impl(
     if opinion_question:
         if settings.web_scrape_enabled:
             await _status("Listening for tavern gossip (community sources)...")
+
+            def _build_community_queries(seed: str) -> list[str]:
+                base = (seed or "").strip()
+                if not base:
+                    return []
+                # Bias toward community discussion where consensus/"most people" answers live.
+                candidates = [
+                    f"osrs {base} reddit",
+                    f"{base} site:reddit.com/r/2007scape",
+                    f"{base} site:reddit.com osrs",
+                    f"osrs {base} forum",
+                ]
+                # De-dupe while preserving order.
+                seen_q: set[str] = set()
+                out: list[str] = []
+                for q in candidates:
+                    qn = q.strip().lower()
+                    if not qn or qn in seen_q:
+                        continue
+                    seen_q.add(qn)
+                    out.append(q)
+                return out
+
             try:
-                scraped_chunks, web_hits = await live_search_web_and_scrape_chunks(
-                    (queries[0] if queries else retrieval_seed),
-                    max_results=5,
-                    max_pages=int(settings.web_scrape_max_pages),
-                    max_chunks_total=int(settings.web_scrape_max_chunks_total),
-                    skip_url_prefixes=prefixes,
-                )
+                scraped_chunks: list = []
+                web_hits: list = []
+                used_query = ""
+
+                seed = (raw_user_message or user_message or retrieval_seed)
+                for q in _build_community_queries(seed)[:3]:
+                    sc, hits = await live_search_web_and_scrape_chunks(
+                        q,
+                        max_results=5,
+                        max_pages=int(settings.web_scrape_max_pages),
+                        max_chunks_total=int(settings.web_scrape_max_chunks_total),
+                        skip_url_prefixes=prefixes,
+                    )
+                    # Keep the first query's hits for UI visibility; keep best chunks found.
+                    if not used_query:
+                        used_query = q
+                        web_hits = hits
+                    if sc:
+                        scraped_chunks = sc
+                        used_query = q
+                        web_hits = hits
+                        break
             except Exception:
                 scraped_chunks, web_hits = ([], [])
+                used_query = ""
 
             if web_hits:
-                web_query = (queries[0] if queries else retrieval_seed)
+                web_query = used_query or (queries[0] if queries else retrieval_seed)
                 web_results = [
-                    {
-                        "title": str((r.title or "")[:120]),
-                        "url": str(r.url),
-                        "snippet": (str(r.snippet)[:240] if r.snippet else None),
-                    }
+                    WebSearchResult(
+                        title=str((r.title or "")[:120]),
+                        url=str(r.url),
+                        snippet=(str(r.snippet)[:240] if r.snippet else None),
+                    )
                     for r in (web_hits or [])
                     if getattr(r, "url", None)
                 ][:5]
@@ -856,8 +914,8 @@ async def _chat_impl(
 
             if scraped_chunks:
                 actions.append("Added community sources from the wider web (untrusted web).")
-                # Merge scraped chunks with wiki chunks; keep order so prompt ranking can choose.
-                chunks = (chunks or []) + scraped_chunks
+                # Prefer community sources over generic wiki pages for opinion prompts.
+                chunks = scraped_chunks + (chunks or [])
         else:
             actions.append("Tip: enable WEB_SCRAPE_ENABLED=true to cite community sources like Reddit.")
 
@@ -998,19 +1056,21 @@ async def _chat_impl(
             "I couldn't find any citable OSRS Wiki sources for that question just now. "
             "Please try rephrasing your question or ask about a different topic."
         )
-        videos = []
-        try:
-            await _status("Scrying the crystal screen for quest videos...")
-            videos = await quest_youtube_videos_with_summaries(user_message=req.message)
-        except Exception:
-            videos = []
+        videos: list[VideoItem] = []
+        if quest_help:
+            try:
+                await _status("Scrying the crystal screen for quest videos...")
+                raw_videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+                videos = [VideoItem.model_validate(v) for v in (raw_videos or [])]
+            except Exception:
+                videos = []
 
         history_id = history_store.add(
             session_id=req.session_id,
             user_message=raw_user_message,
             bot_answer=fallback,
             sources=[],
-            videos=videos,
+            videos=[v.model_dump() for v in videos],
         )
         return ChatResponse(
             answer=fallback,
@@ -1042,11 +1102,13 @@ async def _chat_impl(
             "Set GOOGLE_CLOUD_PROJECT (and authenticate with gcloud) to enable LLM answers."
         )
 
-        videos = []
-        try:
-            videos = await quest_youtube_videos_with_summaries(user_message=user_message)
-        except Exception:
-            videos = []
+        videos: list[VideoItem] = []
+        if quest_help:
+            try:
+                raw_videos = await quest_youtube_videos_with_summaries(user_message=user_message)
+                videos = [VideoItem.model_validate(v) for v in (raw_videos or [])]
+            except Exception:
+                videos = []
 
         sources = []
         for c in prompt_chunks[:5]:
@@ -1058,7 +1120,7 @@ async def _chat_impl(
             user_message=raw_user_message,
             bot_answer=f"{fallback}\n\nError: {exc}",
             sources=[s.model_dump() for s in sources],
-            videos=videos,
+            videos=[v.model_dump() for v in videos],
         )
         return ChatResponse(
             answer=f"{fallback}\n\nError: {exc}",
@@ -1131,11 +1193,11 @@ async def _chat_impl(
                     web_query = retry_primary
                     if web_hits:
                         web_results = [
-                            {
-                                "title": str((r.title or "")[:120]),
-                                "url": str(r.url),
-                                "snippet": (str(r.snippet)[:240] if r.snippet else None),
-                            }
+                            WebSearchResult(
+                                title=str((r.title or "")[:120]),
+                                url=str(r.url),
+                                snippet=(str(r.snippet)[:240] if r.snippet else None),
+                            )
                             for r in (web_hits or [])
                             if getattr(r, "url", None)
                         ][:5]
@@ -1260,21 +1322,24 @@ async def _chat_impl(
             pass
 
     # Quest-only YouTube results (best-effort; doesn't block the core answer).
+    # Only show these for explicit quest-help prompts (walkthrough/requirements), not meta/community questions.
     videos = []
-    try:
-        await _status("Scrying the crystal screen for quest videos...")
-        videos = await quest_youtube_videos_with_summaries(user_message=user_message)
-        if videos:
-            actions.append("Found quest videos and summarized them.")
-    except Exception:
-        videos = []
+    if quest_help:
+        try:
+            await _status("Scrying the crystal screen for quest videos...")
+            raw_videos = await quest_youtube_videos_with_summaries(user_message=user_message)
+            videos = [VideoItem.model_validate(v) for v in (raw_videos or [])]
+            if videos:
+                actions.append("Found quest videos and summarized them.")
+        except Exception:
+            videos = []
 
     history_id = history_store.add(
         session_id=req.session_id,
         user_message=raw_user_message,
         bot_answer=res.text,
         sources=[s.model_dump() for s in sources],
-        videos=videos,
+        videos=[v.model_dump() for v in videos],
     )
 
     return ChatResponse(

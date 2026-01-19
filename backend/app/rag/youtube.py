@@ -8,6 +8,7 @@ import httpx
 
 from ..core.config import settings
 from ..llm.gemini_vertex import GeminiVertexClient
+from .quest_registry import find_quest_title_in_text
 
 
 @dataclass(frozen=True)
@@ -23,12 +24,54 @@ def _looks_like_quest_question(message: str) -> bool:
     msg = (message or "").lower()
     if not msg:
         return False
-    if "quest" in msg:
-        return True
-    # common phrasing for quests
-    if any(p in msg for p in ("quest guide", "how do i start", "how to start", "quest req", "quest requirements")):
-        return True
-    return False
+    # Meta/community questions about quests shouldn't trigger the quest-guide video widget.
+    meta_needles = (
+        "quest cape",
+        "quest point cape",
+        "questpoint cape",
+        "most people",
+        "most common",
+        "popular",
+        "tier list",
+        "best quests",
+        "most important quests",
+        "last quest",
+        "final quest",
+    )
+    if any(n in msg for n in meta_needles):
+        return False
+
+    # If we can identify a specific quest title, treat it as quest intent.
+    # (This enables videos for questions like "How do I complete Desert Treasure II?".)
+    try:
+        if find_quest_title_in_text(message):
+            return True
+    except Exception:
+        pass
+
+    # Otherwise require both the word "quest" and explicit help phrasing.
+    if "quest" not in msg:
+        return False
+
+    help_needles = (
+        "guide",
+        "walkthrough",
+        "quick guide",
+        "requirements",
+        "reqs",
+        "quest req",
+        "quest requirements",
+        "how do i",
+        "how to",
+        "where do i start",
+        "how do i start",
+        "how to start",
+        "start",
+        "complete",
+        "finish",
+        "steps",
+    )
+    return any(p in msg for p in help_needles)
 
 
 def looks_like_quest_question(message: str) -> bool:
