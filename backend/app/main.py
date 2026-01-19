@@ -210,9 +210,20 @@ async def _chat_impl(
             return False
         if len(m) > 140:
             return False
+
+        # If the message already contains several specific keywords, don't treat it as
+        # a context-dependent pronoun follow-up just because it contains words like "this".
+        # This avoids anchoring to the previous topic for questions such as:
+        # "what about helping edmond the slave? what's hard about this quest?"
+        try:
+            specific_terms = [t for t in extract_keywords(m, max_terms=10) if t and len(t) >= 5]
+            if len(specific_terms) >= 3:
+                return False
+        except Exception:
+            pass
+
         pronouns = (
             " it ",
-            " this ",
             " that ",
             " these ",
             " those ",
@@ -226,6 +237,10 @@ async def _chat_impl(
             " there ",
         )
         padded = f" {m} "
+        # Only treat "this" as a follow-up signal for very short prompts.
+        if " this " in padded and len(m) <= 48:
+            return True
+
         return any(p in padded for p in pronouns)
 
     def _looks_like_opinion_or_community_question(message: str) -> bool:
@@ -652,6 +667,30 @@ async def _chat_impl(
 
     key_terms = extract_keywords(retrieval_seed, max_terms=10)
     key_terms = [t for t in key_terms if len(t) >= 4]
+
+    # Ignore generic words that otherwise make unrelated quest pages look relevant.
+    generic_weak_terms = {
+        "osrs",
+        "runescape",
+        "quest",
+        "quests",
+        "guide",
+        "walkthrough",
+        "help",
+        "helping",
+        "hard",
+        "hardest",
+        "difficult",
+        "difficulty",
+        "complete",
+        "completing",
+    }
+    filtered_key_terms = [t for t in key_terms if t and t.lower() not in generic_weak_terms]
+    filtered_topic_terms = [t for t in topic_terms if t and t.lower() not in generic_weak_terms]
+    if filtered_key_terms:
+        key_terms = filtered_key_terms
+    if filtered_topic_terms:
+        topic_terms = filtered_topic_terms
     weak_local = False
     if chunks and (key_terms or topic_terms):
         hay = "\n".join(((c.title or "") + "\n" + (c.text or "")) for c in chunks).lower()
@@ -836,6 +875,25 @@ async def _chat_impl(
         if topic_hint:
             key_terms_for_prompt.extend(extract_keywords(topic_hint, max_terms=6))
         key_terms_for_prompt.extend(extract_keywords(retrieval_seed, max_terms=10))
+
+        # Avoid generic terms dominating ranking (they cause irrelevant generic pages like
+        # "Quest point cape" to win when the user asked about a specific NPC/quest).
+        generic_terms = {
+            "osrs",
+            "runescape",
+            "quest",
+            "quests",
+            "guide",
+            "walkthrough",
+            "help",
+            "helping",
+            "hard",
+            "hardest",
+            "difficult",
+            "difficulty",
+        }
+        key_terms_for_prompt = [t for t in key_terms_for_prompt if t and t.lower() not in generic_terms]
+
         seen_k: set[str] = set()
         key_terms_for_prompt = [t for t in key_terms_for_prompt if t and not (t in seen_k or seen_k.add(t))]
 
@@ -882,6 +940,14 @@ async def _chat_impl(
             if not cs:
                 continue
 
+            # If we have any meaningful key terms, require at least one to match either
+            # title or body before allowing this URL into the prompt.
+            if key_terms_for_prompt:
+                best_text = max((_text_score((getattr(c, "text", "") or "")) for c in (cs or [])), default=0)
+                best_title = max((_title_score(getattr(c, "title", None)) for c in (cs or [])), default=0)
+                if (best_text + best_title) == 0:
+                    continue
+
             ranked_chunks = sorted(cs, key=lambda c: _text_score((getattr(c, "text", "") or "")), reverse=True)
             picked = ranked_chunks[:3]
             merged_text = "\n\n".join(
@@ -907,12 +973,30 @@ async def _chat_impl(
         prefixes=prefixes,
     )
 
+    # If our stricter prompt filtering produced nothing but we do have some local chunks,
+    # treat that as a weak retrieval and attempt a fresh wiki lookup.
+    if (not prompt_chunks) and chunks and (not force_fresh):
+        try:
+            await _status("Those pages seemed irrelevant; searching anew...")
+            retry_q = (queries[0] if queries else retrieval_seed)
+            live_chunks = await live_query_chunks(retry_q, allowed_url_prefixes=prefixes)
+            if live_chunks:
+                actions.append("Local sources looked irrelevant; refreshed wiki search.")
+                chunks = live_chunks
+                prompt_chunks = _build_prompt_chunks(
+                    chunks=chunks,
+                    retrieval_seed=retrieval_seed,
+                    topic_hint=topic_hint,
+                    prefixes=prefixes,
+                )
+        except Exception:
+            pass
+
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
         fallback = (
             "I couldn't find any citable OSRS Wiki sources for that question just now. "
-            "If you have Google CSE configured, check that it is restricted to the OSRS wiki domain(s) in your CSE, "
-            "and that GOOGLE_CSE_API_KEY/GOOGLE_CSE_CX are set for the running service."
+            "Please try rephrasing your question or ask about a different topic."
         )
         videos = []
         try:
