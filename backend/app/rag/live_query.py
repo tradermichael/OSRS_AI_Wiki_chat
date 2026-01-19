@@ -275,6 +275,10 @@ async def live_search_web_and_fetch_chunks(
     out: list[RetrievedChunk] = []
     seen_url: set[str] = set()
 
+    ql = (query or "").lower()
+    combat_intent = any(w in ql for w in ("strateg", "beat", "defeat", "kill", "boss", "gear", "prayer", "phase"))
+    quest_intent = any(w in ql for w in ("quest", "walkthrough", "quick guide", "requirements", "reqs", "steps"))
+
     for url in urls:
         if url in seen_url:
             continue
@@ -284,6 +288,17 @@ async def live_search_web_and_fetch_chunks(
         if not title:
             continue
 
+        candidates: list[str] = []
+        if combat_intent:
+            candidates.append(f"{title}/Strategies")
+        if quest_intent:
+            candidates.append(f"{title}/Quick_guide")
+            candidates.append(f"{title}/Walkthrough")
+        candidates.append(title)
+        # de-dupe while preserving order
+        seen_t: set[str] = set()
+        candidates = [t for t in candidates if t and not (t.lower() in seen_t or seen_t.add(t.lower()))]
+
         api = None
         for p, a in prefix_to_api:
             if p and url.startswith(p):
@@ -292,9 +307,14 @@ async def live_search_web_and_fetch_chunks(
         if not api:
             continue
 
-        try:
-            page = await mediawiki_fetch_plaintext(api, title)
-        except Exception:
+        page = None
+        for cand in candidates:
+            try:
+                page = await mediawiki_fetch_plaintext(api, cand)
+                break
+            except Exception:
+                continue
+        if not page:
             continue
 
         if prefixes and page.url and not page.url.startswith(prefixes):

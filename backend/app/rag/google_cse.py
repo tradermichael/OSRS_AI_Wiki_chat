@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 
@@ -41,6 +41,20 @@ def url_to_title(url: str) -> str | None:
 
     if not u.path:
         return None
+
+    # Some wiki links use index.php?title=Page_title
+    if u.query:
+        try:
+            qs = parse_qs(u.query)
+            title_q = (qs.get("title") or [None])[0]
+            if title_q:
+                title_q = unquote(str(title_q))
+                title_q = title_q.replace("_", " ")
+                title_q = re.sub(r"\s+", " ", title_q).strip()
+                if title_q:
+                    return title_q
+        except Exception:
+            pass
 
     # Old School wiki: /w/Title
     if "/w/" in u.path:

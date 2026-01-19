@@ -513,10 +513,9 @@ async def _chat_impl(
             except Exception:
                 web_chunks, web_hits = ([], [])
 
-            if web_chunks:
-                actions.append("Used a web search fallback to find the right wiki page.")
-                web_query = primary_q
-                # Include a tiny sample so the UI can show what the web search returned.
+            # Even if we couldn't fetch chunks, still show a sample of what the web search returned.
+            web_query = primary_q
+            if web_hits:
                 web_results = [
                     {
                         "title": str((r.title or "")[:120]),
@@ -526,6 +525,10 @@ async def _chat_impl(
                     for r in (web_hits or [])
                     if getattr(r, "url", None)
                 ][:5]
+                actions.append(f"Google CSE returned {len(web_results)} lead(s).")
+
+            if web_chunks:
+                actions.append("Used a web search fallback to find the right wiki page.")
                 chunks = web_chunks
                 # best-effort cache
                 try:
@@ -542,6 +545,11 @@ async def _chat_impl(
                         store.add_documents(texts=texts, metadatas=metadatas, ids=ids)
                 except Exception:
                     pass
+
+            elif web_hits:
+                actions.append("Web search found leads, but I couldn't fetch allowed wiki pages from them.")
+            else:
+                actions.append("Web search returned no usable leads (check CSE keys and site restriction).")
 
     # De-dupe by URL before prompting so citation numbers match what we display.
     # BUT: include multiple relevant excerpts from the same page so we don't miss
@@ -601,6 +609,37 @@ async def _chat_impl(
                 url=u,
                 title=cs[0].title,
             )
+        )
+
+    if not prompt_chunks:
+        await _status("My shelves come up empty; no citable pages found.")
+        fallback = (
+            "I couldn't find any citable OSRS Wiki sources for that question just now. "
+            "If you have Google CSE configured, check that it is restricted to the OSRS wiki domain(s) in your CSE, "
+            "and that GOOGLE_CSE_API_KEY/GOOGLE_CSE_CX are set for the running service."
+        )
+        videos = []
+        try:
+            await _status("Scrying the crystal screen for quest videos...")
+            videos = await quest_youtube_videos_with_summaries(user_message=req.message)
+        except Exception:
+            videos = []
+
+        history_id = history_store.add(
+            session_id=req.session_id,
+            user_message=req.message,
+            bot_answer=fallback,
+            sources=[],
+            videos=videos,
+        )
+        return ChatResponse(
+            answer=fallback,
+            sources=[],
+            history_id=str(history_id),
+            videos=videos,
+            actions=actions,
+            web_query=web_query,
+            web_results=web_results,
         )
 
     await _status("Arranging citations and weaving your answer...")
