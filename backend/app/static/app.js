@@ -1252,6 +1252,7 @@ function enterHistoryView(item) {
   const ts = Number.isNaN(dt.getTime()) ? item.created_at : dt.toLocaleString();
   if (viewBannerTextEl) viewBannerTextEl.textContent = `Viewing #${item.id} • ${ts}`;
   if (viewBannerEl) viewBannerEl.hidden = false;
+  if (resumeChatBtn) resumeChatBtn.hidden = false;
   setComposerEnabled(false);
 
   addMessage('me', 'You', item.user_message);
@@ -1261,6 +1262,7 @@ function enterHistoryView(item) {
 function exitHistoryView() {
   viewingHistoryId = null;
   if (viewBannerEl) viewBannerEl.hidden = true;
+  if (resumeChatBtn) resumeChatBtn.hidden = true;
   setComposerEnabled(true);
   input.focus();
 

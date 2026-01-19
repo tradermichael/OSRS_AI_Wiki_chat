@@ -46,11 +46,15 @@
     <div class="app-layout">
       <main class="chat">
         <div class="public-notice">
-          All interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
-        </div>
-        <div id="viewBanner" class="view-banner" hidden>
-          <span id="viewBannerText"></span>
-          <button id="resumeChat" type="button">New chat</button>
+          <div class="public-notice__left">
+            <div class="public-notice__text">
+              All interactions with <strong>Wise Old AI</strong> are publicly stored and shared.
+            </div>
+            <div id="viewBanner" class="public-notice__view" hidden>
+              <span id="viewBannerText"></span>
+            </div>
+          </div>
+          <button id="resumeChat" type="button" class="public-notice__action" hidden>New chat</button>
         </div>
 
         <div id="wikiPreview" class="wiki-preview" hidden>

@@ -15,7 +15,7 @@ class WikiPreview:
     thumbnail_url: str | None = None
 
 
-async def fetch_wiki_preview(*, mediawiki_api: str, title: str, thumb_size: int = 360) -> WikiPreview:
+async def fetch_wiki_preview(*, mediawiki_api: str, title: str, thumb_size: int = 512) -> WikiPreview:
     """Fetch a wiki preview: title, canonical url, plaintext extract, and a thumbnail if available."""
 
     base_params = {
