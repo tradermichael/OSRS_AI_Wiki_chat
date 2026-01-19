@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     youtube_max_results: int = 3
     youtube_max_summaries: int = 2
 
+    # Optional: Google Cloud Speech-to-Text (server-side transcription)
+    # Useful as a fallback when the browser Web Speech API is unavailable.
+    gcp_speech_enabled: bool = False
+    gcp_speech_language: str = "en-US"
+    gcp_speech_max_bytes: int = 3_000_000
+
     # Path to RAG sources configuration JSON (repo root defaults to rag_sources.json).
     rag_sources_path: str | None = None
 

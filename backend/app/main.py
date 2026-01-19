@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from fastapi import FastAPI, HTTPException
+from fastapi import File, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -41,6 +42,7 @@ from .schemas import (
     FeedbackRequest,
     FeedbackResponse,
     WikiPreviewResponse,
+    SpeechTranscribeResponse,
     PublicHistoryItem,
     PublicHistoryListResponse,
     SourceChunk,
@@ -134,6 +136,85 @@ async def wiki_preview(url: str):
     )
 
 
+@app.post("/api/speech/transcribe", response_model=SpeechTranscribeResponse)
+async def speech_transcribe(
+    file: UploadFile = File(...),
+    language: str | None = Form(default=None),
+):
+    """Transcribe short audio snippets via Google Cloud Speech-to-Text.
+
+    Intended as a fallback when browser SpeechRecognition isn't available.
+    Uses Application Default Credentials (gcloud auth/service account) and must be enabled
+    via GCP_SPEECH_ENABLED=true.
+    """
+
+    if not bool(settings.gcp_speech_enabled):
+        raise HTTPException(status_code=400, detail="Speech-to-text is disabled (set GCP_SPEECH_ENABLED=true).")
+
+    ct = (file.content_type or "").lower().strip()
+    if ct not in {
+        "audio/webm",
+        "audio/webm;codecs=opus",
+        "audio/ogg",
+        "audio/ogg;codecs=opus",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/mpeg",
+    }:
+        raise HTTPException(status_code=400, detail=f"Unsupported audio type: {file.content_type!r}")
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty audio upload")
+
+    max_bytes = int(getattr(settings, "gcp_speech_max_bytes", 3_000_000) or 3_000_000)
+    if len(data) > max_bytes:
+        raise HTTPException(status_code=413, detail=f"Audio too large (max {max_bytes} bytes)")
+
+    lang = (language or settings.gcp_speech_language or "en-US").strip() or "en-US"
+
+    try:
+        from google.cloud import speech
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"google-cloud-speech not installed: {exc}") from exc
+
+    enc = speech.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED
+    if "webm" in ct:
+        enc = speech.RecognitionConfig.AudioEncoding.WEBM_OPUS
+    elif "ogg" in ct:
+        enc = speech.RecognitionConfig.AudioEncoding.OGG_OPUS
+    elif "wav" in ct:
+        enc = speech.RecognitionConfig.AudioEncoding.LINEAR16
+    elif "mpeg" in ct:
+        enc = speech.RecognitionConfig.AudioEncoding.MP3
+
+    client = speech.SpeechClient()
+    config = speech.RecognitionConfig(
+        encoding=enc,
+        language_code=lang,
+        enable_automatic_punctuation=True,
+        model="latest_short",
+    )
+    audio = speech.RecognitionAudio(content=data)
+
+    try:
+        resp = client.recognize(config=config, audio=audio)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Speech recognition failed: {exc}") from exc
+
+    parts: list[str] = []
+    for r in (resp.results or []):
+        alts = getattr(r, "alternatives", None) or []
+        if not alts:
+            continue
+        t = (alts[0].transcript or "").strip()
+        if t:
+            parts.append(t)
+    text = " ".join(parts).strip()
+
+    return SpeechTranscribeResponse(text=text)
+
+
 @app.get("/api/gold/total", response_model=GoldTotalResponse)
 def gold_total():
     store = get_gold_store()
@@ -189,6 +270,7 @@ async def _chat_impl(
     web_results: list[WebSearchResult] = []
     used_web_snippets = False
     used_youtube_sources = False
+    did_focus_followup = False
 
     async def _status(msg: str) -> None:
         if status_cb:
@@ -1104,6 +1186,51 @@ async def _chat_impl(
                 ][:5]
                 actions.append(f"Google CSE returned {len(web_results)} lead(s).")
 
+                # Even if scraping fails (common for Reddit), use the search snippets as lightweight
+                # evidence so the model can actually consider community consensus.
+                try:
+                    import re
+
+                    terms = extract_keywords(web_query or (raw_user_message or user_message or retrieval_seed), max_terms=10)
+
+                    def _snip_score(r) -> int:
+                        hay = "\n".join([
+                            str(getattr(r, "title", "") or ""),
+                            str(getattr(r, "snippet", "") or ""),
+                            str(getattr(r, "url", "") or ""),
+                        ]).lower()
+                        return sum(1 for t in (terms or []) if t and t.lower() in hay)
+
+                    ranked_hits = sorted(
+                        [r for r in (web_hits or []) if getattr(r, "url", None)],
+                        key=_snip_score,
+                        reverse=True,
+                    )
+                    snippet_chunks: list[RetrievedChunk] = []
+                    for r in ranked_hits[:6]:
+                        u = str(r.url)
+                        snip = (str(getattr(r, "snippet", "") or "") or "").strip()
+                        snip = re.sub(r"\s+", " ", snip)
+                        if not u or len(snip) < 40:
+                            continue
+                        t = str(getattr(r, "title", "") or "(search result)")
+                        snippet_chunks.append(
+                            RetrievedChunk(
+                                text=f"Search snippet: {snip}",
+                                url=u,
+                                title=f"[Community Snippet] {t[:180]}",
+                            )
+                        )
+                        if len(snippet_chunks) >= 3:
+                            break
+
+                    if snippet_chunks:
+                        used_web_snippets = True
+                        actions.append("Included community search snippets in sources.")
+                        chunks = (snippet_chunks + (chunks or []))
+                except Exception:
+                    pass
+
             if scraped_chunks:
                 actions.append("Added community sources from the wider web (untrusted web).")
                 # Prefer community sources over generic wiki pages for opinion prompts.
@@ -1295,6 +1422,57 @@ async def _chat_impl(
                             prompt_chunks[-1] = ext_chunk
                         else:
                             prompt_chunks.append(ext_chunk)
+
+            # If we have non-YouTube external sources (e.g., Reddit/forums), ensure at least
+            # one of those makes it into the prompt too (YouTube alone shouldn't crowd them out).
+            try:
+                from urllib.parse import urlparse
+
+                def _is_external(u: str) -> bool:
+                    uu = (u or "").strip()
+                    return bool(uu) and (not uu.startswith(prefixes_t))
+
+                def _is_youtube(u: str) -> bool:
+                    try:
+                        h = (urlparse(u).hostname or "").lower()
+                    except Exception:
+                        h = ""
+                    return bool(h) and (h.endswith("youtube.com") or h == "youtu.be")
+
+                has_non_yt_external_anywhere = any(
+                    _is_external((getattr(c, "url", "") or "").strip()) and (not _is_youtube((getattr(c, "url", "") or "").strip()))
+                    for c in (chunks or [])
+                )
+                has_non_yt_external_in_prompt = any(
+                    _is_external((getattr(c, "url", "") or "").strip()) and (not _is_youtube((getattr(c, "url", "") or "").strip()))
+                    for c in (prompt_chunks or [])
+                )
+
+                if has_non_yt_external_anywhere and (not has_non_yt_external_in_prompt):
+                    # Pick the first non-YouTube external URL we have.
+                    cand_urls = [u for u in url_to_chunks.keys() if _is_external(u) and (not _is_youtube(u))]
+                    if cand_urls:
+                        u = cand_urls[0]
+                        cs = url_to_chunks.get(u) or []
+                        if cs:
+                            ranked_chunks = sorted(cs, key=lambda c: _text_score((getattr(c, "text", "") or "")), reverse=True)
+                            picked = ranked_chunks[:3]
+                            merged_text = "\n\n".join(
+                                ((getattr(c, "text", "") or "").strip()) for c in picked if (getattr(c, "text", "") or "").strip()
+                            ).strip()
+                            if len(merged_text) > 2200:
+                                merged_text = merged_text[:2200] + "..."
+                            ext_chunk = type(cs[0])(
+                                text=merged_text or (getattr(cs[0], "text", "") or ""),
+                                url=u,
+                                title=getattr(cs[0], "title", None),
+                            )
+                            if prompt_chunks:
+                                prompt_chunks[-1] = ext_chunk
+                            else:
+                                prompt_chunks.append(ext_chunk)
+            except Exception:
+                pass
 
         return prompt_chunks
 
@@ -1601,6 +1779,48 @@ async def _chat_impl(
                 actions.append("Rewrote the answer using refreshed sources.")
         except Exception:
             # Retry is best-effort.
+            pass
+
+    # If the model picked a specific quest title (common for "hardest quest" community questions),
+    # do a focused wiki retrieval on that quest and regenerate once. This helps enrich the answer
+    # with factual details (requirements/boss/mechanics) even when the initial sources were mostly
+    # community/YouTube.
+    if not did_focus_followup:
+        try:
+            picked_quest = find_quest_title_in_text(res.text or "")
+            if picked_quest:
+                already_has = any(
+                    picked_quest.lower() in (str(getattr(c, "title", "") or "").lower())
+                    for c in (prompt_chunks or [])
+                )
+                if not already_has:
+                    await _status(f"Double-checking the wiki for {picked_quest}...")
+                    focus_chunks = await live_query_chunks(picked_quest, allowed_url_prefixes=prefixes)
+                    if focus_chunks:
+                        focus_all = (focus_chunks or []) + (prompt_chunks or [])
+                        focus_prompt_chunks = _build_prompt_chunks(
+                            chunks=focus_all,
+                            retrieval_seed=picked_quest,
+                            user_question=(raw_user_message or user_message or ""),
+                            topic_hint=topic_hint,
+                            prefixes=prefixes,
+                            allow_external_sources=allow_external_sources,
+                        )
+                        if focus_prompt_chunks:
+                            focus_prompt = build_rag_prompt(
+                                user_message=(prompt_user_message + f"\n\nIf you name a specific quest (like '{picked_quest}'), include 2-4 factual details about it from the wiki sources (requirements, boss/mechanics, or notable difficulty reasons), then summarize the community consensus.")
+                                if prompt_user_message else prompt_user_message,
+                                conversation_context=conversation_context,
+                                chunks=focus_prompt_chunks,
+                                allowed_url_prefixes=prefixes,
+                                allow_external_sources=bool(allow_external_sources),
+                            )
+                            res = client.generate(focus_prompt)
+                            prompt_chunks = focus_prompt_chunks
+                            actions.append(f"Follow-up retrieval: added focused wiki excerpts for {picked_quest}.")
+                            did_focus_followup = True
+        except Exception:
+            # Best-effort; don't break chat.
             pass
 
     # Attach a small thumbnail per cited URL (best-effort) so the UI can show relevant images.

@@ -96,5 +96,9 @@ class WikiPreviewResponse(BaseModel):
     thumbnail_url: str | None = None
 
 
+class SpeechTranscribeResponse(BaseModel):
+    text: str
+
+
 class PublicHistoryListResponse(BaseModel):
     items: list[PublicHistoryItem]

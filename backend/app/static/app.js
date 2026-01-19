@@ -265,6 +265,73 @@ function renderVideos(bubble, videos) {
 function setWikiPreviewVisible(visible) {
   if (!wikiPreviewEl) return;
   wikiPreviewEl.hidden = !visible;
+
+  // When closing, stop any embedded media.
+  if (!visible) {
+    if (wikiPreviewExtractEl) wikiPreviewExtractEl.replaceChildren();
+    if (wikiPreviewThumbEl) {
+      wikiPreviewThumbEl.hidden = true;
+      wikiPreviewThumbEl.src = '';
+    }
+    if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Wiki Preview';
+  }
+}
+
+function youtubeVideoId(url) {
+  const u = String(url || '').trim();
+  if (!u) return null;
+  try {
+    const parsed = new URL(u);
+    const host = (parsed.hostname || '').toLowerCase();
+    if (host === 'youtu.be') {
+      const id = (parsed.pathname || '').replace('/', '').trim();
+      return id || null;
+    }
+    if (host.endsWith('youtube.com')) {
+      const id = parsed.searchParams.get('v');
+      return (id && String(id).trim()) ? String(id).trim() : null;
+    }
+  } catch {
+    // ignore
+  }
+  const m = u.match(/[?&]v=([^&]+)/i);
+  return m ? String(m[1] || '').trim() || null : null;
+}
+
+function openYouTubePreview(url, title) {
+  const u = String(url || '').trim();
+  if (!u) return;
+  const vid = youtubeVideoId(u);
+  if (!vid) {
+    openWikiPreview(u);
+    return;
+  }
+
+  setWikiPreviewVisible(true);
+  if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = (String(title || '').trim() || 'YouTube');
+  if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = u;
+  if (wikiPreviewThumbEl) {
+    wikiPreviewThumbEl.hidden = true;
+    wikiPreviewThumbEl.src = '';
+  }
+
+  if (wikiPreviewExtractEl) {
+    wikiPreviewExtractEl.replaceChildren();
+    const player = document.createElement('div');
+    player.className = 'video-player';
+
+    const iframe = document.createElement('iframe');
+    iframe.className = 'video-iframe';
+    iframe.loading = 'lazy';
+    iframe.allowFullscreen = true;
+    iframe.referrerPolicy = 'strict-origin-when-cross-origin';
+    iframe.allow = 'accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share';
+    iframe.src = `https://www.youtube.com/embed/${encodeURIComponent(vid)}?autoplay=1`;
+    iframe.title = String(title || 'YouTube video');
+
+    player.appendChild(iframe);
+    wikiPreviewExtractEl.appendChild(player);
+  }
 }
 
 function setWikiPreviewLoading(url) {
@@ -466,8 +533,134 @@ function initVoiceInput() {
 
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SpeechRecognition) {
-    voiceToggleBtn.hidden = true;
-    setVoiceStatus('');
+    // Fallback: record short audio and send to server for transcription.
+    // This requires MediaRecorder support + the backend /api/speech/transcribe endpoint.
+    const hasRecorder = typeof window.MediaRecorder !== 'undefined' && navigator && navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+    if (!hasRecorder) {
+      voiceToggleBtn.hidden = true;
+      setVoiceStatus('');
+      return;
+    }
+
+    let recording = false;
+    let mediaRecorder = null;
+    let stream = null;
+    let chunks = [];
+    let baseText = '';
+
+    async function startRecording() {
+      if (recording) return;
+      if (input.disabled) return;
+      baseText = (input.value || '').trim();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch {
+        setVoiceStatus('Microphone permission denied.');
+        return;
+      }
+
+      chunks = [];
+      const options = {};
+      try {
+        // Prefer opus in webm when supported.
+        if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+          options.mimeType = 'audio/webm;codecs=opus';
+        } else if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm')) {
+          options.mimeType = 'audio/webm';
+        }
+      } catch {
+        // ignore
+      }
+
+      try {
+        mediaRecorder = new MediaRecorder(stream, options);
+      } catch {
+        // Some browsers don't like options; retry without.
+        mediaRecorder = new MediaRecorder(stream);
+      }
+
+      mediaRecorder.addEventListener('dataavailable', (e) => {
+        if (e && e.data && e.data.size > 0) chunks.push(e.data);
+      });
+
+      mediaRecorder.addEventListener('stop', async () => {
+        recording = false;
+        setVoiceBtnState(false);
+        setVoiceStatus('Transcribing…');
+
+        try {
+          const mime = (mediaRecorder && mediaRecorder.mimeType) ? mediaRecorder.mimeType : 'audio/webm';
+          const blob = new Blob(chunks, { type: mime });
+          const form = new FormData();
+          form.append('file', blob, 'voice.webm');
+
+          const r = await fetch('/api/speech/transcribe', { method: 'POST', body: form });
+          if (!r.ok) {
+            const err = await r.json().catch(() => ({}));
+            throw new Error(err.detail || `HTTP ${r.status}`);
+          }
+          const data = await r.json();
+          const t = (data && data.text) ? String(data.text).trim() : '';
+          if (t) {
+            const parts = [];
+            if (baseText) parts.push(baseText);
+            parts.push(t);
+            input.value = parts.join(baseText ? ' ' : '');
+          }
+          setVoiceStatus('');
+        } catch (err) {
+          setVoiceStatus(err.message || String(err));
+        } finally {
+          try {
+            if (stream) {
+              stream.getTracks().forEach((tr) => tr.stop());
+            }
+          } catch {
+            // ignore
+          }
+          stream = null;
+          mediaRecorder = null;
+          chunks = [];
+        }
+      });
+
+      try {
+        mediaRecorder.start();
+        recording = true;
+        setVoiceBtnState(true);
+        setVoiceStatus('Recording… click again to stop.');
+      } catch {
+        recording = false;
+        setVoiceBtnState(false);
+        setVoiceStatus('Could not start recording.');
+      }
+    }
+
+    function stopRecording() {
+      if (!recording) {
+        setVoiceBtnState(false);
+        setVoiceStatus('');
+        return;
+      }
+      try {
+        mediaRecorder && mediaRecorder.stop();
+      } catch {
+        // ignore
+      }
+    }
+
+    voiceToggleBtn.addEventListener('click', () => {
+      if (input.disabled) return;
+      if (recording) stopRecording();
+      else startRecording();
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) stopRecording();
+    });
+
+    voice = { stop: stopRecording };
+    setVoiceBtnState(false);
     return;
   }
 
@@ -850,7 +1043,13 @@ if (messagesEl) {
 
     if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
-    openWikiPreview(url);
+
+    const label = (a.textContent || '').replace(/^\[\d+\]\s*/g, '').trim();
+    if (youtubeVideoId(url)) {
+      openYouTubePreview(url, label);
+    } else {
+      openWikiPreview(url);
+    }
   });
 }
 
