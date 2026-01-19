@@ -359,19 +359,6 @@ async def gemini_live_websocket(ws: WebSocket):
         await ws.close(code=1011)
         return
 
-    try:
-        start_raw = await ws.receive_text()
-        start_msg = json.loads(start_raw)
-    except Exception:
-        await ws.send_json({"type": "error", "detail": "Expected initial JSON start message."})
-        await ws.close(code=1003)
-        return
-
-    if (start_msg.get("type") or "start") != "start":
-        await ws.send_json({"type": "error", "detail": "First message must be {type:'start', ...}."})
-        await ws.close(code=1003)
-        return
-
     def _normalize_model_name(m: str) -> str:
         m = (m or "").strip()
         # Accept full resource paths like "projects/.../publishers/google/models/<id>"
@@ -379,26 +366,13 @@ async def gemini_live_websocket(ws: WebSocket):
             m = m.rsplit("/models/", 1)[-1].strip()
         return m
 
-    # Allow the client to request a specific live model (still validated on the server).
-    requested_model = _normalize_model_name(str(start_msg.get("model") or start_msg.get("modelId") or ""))
-    if requested_model:
-        allowed = {
-            "gemini-live-2.5-flash-native-audio",
-            "gemini-live-2.5-flash-exp-native-audio",
-        }
-        if requested_model not in allowed:
-            await ws.send_json(
-                {
-                    "type": "error",
-                    "detail": f"Unsupported live model '{requested_model}'.",
-                    "hint": "Use 'gemini-live-2.5-flash-native-audio'.",
-                    "model": requested_model,
-                    "location": location,
-                }
-            )
-            await ws.close(code=1011)
-            return
-        model = requested_model
+    allowed_models = {
+        "gemini-live-2.5-flash-native-audio",
+        "gemini-live-2.5-flash-exp-native-audio",
+    }
+
+    # Normalize server-configured model as well (env vars sometimes contain full resource paths).
+    model = _normalize_model_name(model)
 
     # Guard against a common misconfiguration: truncated model names.
     # The intended model is e.g. "gemini-live-2.5-flash-native-audio".
@@ -414,6 +388,50 @@ async def gemini_live_websocket(ws: WebSocket):
         )
         await ws.close(code=1011)
         return
+
+    # If the server is configured with an unsupported model ID, fail fast with a clear error.
+    if model and model not in allowed_models:
+        await ws.send_json(
+            {
+                "type": "error",
+                "detail": f"Unsupported GEMINI_LIVE_MODEL '{model}'.",
+                "hint": "Use 'gemini-live-2.5-flash-native-audio'.",
+                "model": model,
+                "location": location,
+            }
+        )
+        await ws.close(code=1011)
+        return
+
+    try:
+        start_raw = await ws.receive_text()
+        start_msg = json.loads(start_raw)
+    except Exception:
+        await ws.send_json({"type": "error", "detail": "Expected initial JSON start message."})
+        await ws.close(code=1003)
+        return
+
+    if (start_msg.get("type") or "start") != "start":
+        await ws.send_json({"type": "error", "detail": "First message must be {type:'start', ...}."})
+        await ws.close(code=1003)
+        return
+
+    # Allow the client to request a specific live model (still validated on the server).
+    requested_model = _normalize_model_name(str(start_msg.get("model") or start_msg.get("modelId") or ""))
+    if requested_model:
+        if requested_model not in allowed_models:
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "detail": f"Unsupported live model '{requested_model}'.",
+                    "hint": "Use 'gemini-live-2.5-flash-native-audio'.",
+                    "model": requested_model,
+                    "location": location,
+                }
+            )
+            await ws.close(code=1011)
+            return
+        model = requested_model
 
     system_instruction = (start_msg.get("systemInstruction") or "").strip() or (
         "You are Wise Old AI, an Old School RuneScape helper. "
@@ -502,6 +520,22 @@ async def gemini_live_websocket(ws: WebSocket):
             if msg_text:
                 await ws.send_json({"type": "model_text", "text": msg_text})
 
+    def _friendly_live_error_detail(exc: Exception) -> str:
+        raw = str(exc) if exc is not None else ""
+        low = raw.lower()
+        if "policy violation" in low or "publisher model" in low:
+            return (
+                "Gemini Live rejected the request (policy/permissions). "
+                "This usually means the live model isn't available to this project/region, "
+                "or the model id is misconfigured."
+            )
+        if "permission" in low or "unauth" in low or "forbidden" in low:
+            return (
+                "Gemini Live request was denied (permissions). "
+                "Check that Vertex AI is enabled and the Cloud Run service account has access."
+            )
+        return raw or "Gemini Live connection failed."
+
     try:
         async with client.aio.live.connect(model=model, config=connect_config) as session:
             await ws.send_json({"type": "ready", "model": model, "location": location})
@@ -549,15 +583,20 @@ async def gemini_live_websocket(ws: WebSocket):
     except WebSocketDisconnect:
         return
     except Exception as exc:
-        await ws.send_json(
-            {
-                "type": "error",
-                "detail": str(exc),
-                "model": model,
-                "location": location,
-            }
-        )
-        await ws.close(code=1011)
+        # Never let Live API errors bubble out; browsers will show a confusing 1008 close.
+        with contextlib.suppress(Exception):
+            await ws.send_json(
+                {
+                    "type": "error",
+                    "detail": _friendly_live_error_detail(exc),
+                    "raw": str(exc)[:500],
+                    "model": model,
+                    "location": location,
+                }
+            )
+        with contextlib.suppress(Exception):
+            await ws.close(code=1011)
+        return
 
 
 @app.get("/api/gold/total", response_model=GoldTotalResponse)
@@ -977,6 +1016,8 @@ async def _chat_impl(
                 "beat",
                 "defeat",
                 "kill",
+                "survive",
+                "survival",
                 "strategy",
                 "strategies",
                 "guide",
@@ -989,6 +1030,23 @@ async def _chat_impl(
                 "prayer",
                 "pray",
             )
+        )
+
+    def _best_effort_fragment_of_seren_plan() -> str:
+        # Best-effort, commonly used approach; not guaranteed and may vary by stats/gear.
+        return (
+            "(common player experience; not sourced) For the Fragment of Seren fight, most players win by "
+            "building a lot of healing and timing big heals around her burst-damage specials.\n\n"
+            "Practical plan:\n"
+            "1) Go in with strong healing: Saradomin brews + super restores, plus high-heal food.\n"
+            "2) Bring emergency heals: Phoenix necklaces are commonly used to survive her big hits; "
+            "pair them with quick healing items so you don’t get combo’d out.\n"
+            "3) Use reliable DPS you can sustain: many players use ranged or magic with consistent accuracy, "
+            "and prioritize staying alive over max damage.\n"
+            "4) Keep your HP high before any ‘big hit’ moments: if you get clipped while low, the fight snowballs fast.\n"
+            "5) Consider Redemption timing (if you’re using prayer) but don’t rely on prayer alone as your only defense.\n\n"
+            "If you tell me your combat stats, whether you’re using ranged or magic, and what supplies you have access to "
+            "(brews? phoenix necklaces? blood spells?), I’ll tailor an exact inventory + step-by-step timing plan."
         )
 
     def _looks_like_quest_help_question(message: str) -> bool:
@@ -1112,6 +1170,15 @@ async def _chat_impl(
     # Prefer current explicit topic when present; otherwise fall back to prior turn.
     topic_hint = (cur_topic_hint or prev_topic_hint).strip()
 
+    # If the user explicitly mentions Seren/Fragment, prefer that as the topic so retrieval
+    # can pull the correct boss/strategies pages.
+    _um_l = (user_message or "").lower()
+    if topic_hint and ("song of the elves" in topic_hint.lower()):
+        if "seren" in _um_l or "fragment" in _um_l:
+            topic_hint = "Fragment of Seren"
+    elif (not topic_hint) and ("seren" in _um_l or "fragment of seren" in _um_l):
+        topic_hint = "Fragment of Seren"
+
     strategy_followup = bool(topic_hint and _looks_like_strategy_question(user_message))
     quest_help = bool(topic_hint and _looks_like_quest_help_question(user_message))
 
@@ -1167,6 +1234,12 @@ async def _chat_impl(
     if quest_help:
         force_fresh = True
         actions.append("Quest help detected; favored fresh wiki lookups.")
+
+    # For combat/strategy questions, we still prefer fresh retrieval, but we also allow best-effort
+    # guidance even if we can't fetch a perfect strategy page.
+    if strategy_followup:
+        force_fresh = True
+        actions.append("Combat/strategy question detected; favored fresh lookups.")
 
     # Fast path: reuse a previously-generated, cited answer for similar questions.
     await _status("Leafing through my old scrolls for a matching answer...")
@@ -2037,11 +2110,20 @@ async def _chat_impl(
 
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
-        if opinion_question or difficulty_question:
+        if strategy_followup and ("seren" in msg_l or "fragment" in msg_l or "song of the elves" in msg_l):
+            fallback = _best_effort_fragment_of_seren_plan()
+        elif opinion_question or difficulty_question:
             fallback = (
                 "I couldn't fetch citable pages for that just now, my friend — but I can still help. "
                 "When players ask for the 'hardest part' of a quest, it's often subjective, and the best answer depends on what step you're stuck on. "
                 "Tell me which step/room/boss you're at (or what the game message says), and what your stats/gear are, and I'll give a practical plan."
+            )
+        elif strategy_followup:
+            fallback = (
+                "(common player experience; not sourced) I couldn't fetch citable strategy pages just now, "
+                "but I can still help you win this fight.\n\n"
+                "Tell me the boss/monster name, your combat stats, and what style you're using (melee/range/mage), "
+                "and I’ll give you an inventory + step-by-step plan."
             )
         elif bool(settings.web_scrape_enabled) or (web_results and len(web_results) > 0):
             fallback = (
@@ -2086,7 +2168,7 @@ async def _chat_impl(
         chunks=prompt_chunks,
         allowed_url_prefixes=prefixes,
         allow_external_sources=bool(allow_external_sources),
-        allow_best_effort=bool(opinion_question or difficulty_question),
+        allow_best_effort=bool(opinion_question or difficulty_question or strategy_followup or quest_help),
     )
 
     try:

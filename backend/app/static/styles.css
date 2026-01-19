@@ -207,9 +207,13 @@ body {
 
 .wiki-preview__body {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  grid-template-columns: 1fr;
   gap: 10px;
   align-items: start;
+}
+
+.wiki-preview--has-thumb .wiki-preview__body {
+  grid-template-columns: 96px 1fr;
 }
 
 .wiki-preview__thumb {
@@ -224,6 +228,8 @@ body {
   font-size: 18px;
   line-height: 1.25;
   color: rgba(33, 25, 16, 0.92);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 640px) {

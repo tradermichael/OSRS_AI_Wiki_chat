@@ -280,6 +280,7 @@ function setWikiPreviewVisible(visible) {
       wikiPreviewThumbEl.hidden = true;
       wikiPreviewThumbEl.src = '';
     }
+    wikiPreviewEl.classList.remove('wiki-preview--has-thumb');
     if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Wiki Preview';
   }
 }
@@ -315,6 +316,7 @@ function openYouTubePreview(url, title) {
   }
 
   setWikiPreviewVisible(true);
+  if (wikiPreviewEl) wikiPreviewEl.classList.remove('wiki-preview--has-thumb');
   if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = (String(title || '').trim() || 'YouTube');
   if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = u;
   if (wikiPreviewThumbEl) {
@@ -349,6 +351,7 @@ function setWikiPreviewLoading(url) {
     wikiPreviewThumbEl.hidden = true;
     wikiPreviewThumbEl.src = '';
   }
+  if (wikiPreviewEl) wikiPreviewEl.classList.remove('wiki-preview--has-thumb');
 }
 
 async function openWikiPreview(url) {
@@ -375,9 +378,11 @@ async function openWikiPreview(url) {
       if (thumb) {
         wikiPreviewThumbEl.src = thumb;
         wikiPreviewThumbEl.hidden = false;
+        if (wikiPreviewEl) wikiPreviewEl.classList.add('wiki-preview--has-thumb');
       } else {
         wikiPreviewThumbEl.hidden = true;
         wikiPreviewThumbEl.src = '';
+        if (wikiPreviewEl) wikiPreviewEl.classList.remove('wiki-preview--has-thumb');
       }
     }
   } catch {
@@ -385,6 +390,7 @@ async function openWikiPreview(url) {
     if (wikiPreviewTitleEl) wikiPreviewTitleEl.textContent = 'Preview unavailable';
     if (wikiPreviewExtractEl) wikiPreviewExtractEl.textContent = 'Could not fetch a preview. Use “Open in new tab”.';
     if (wikiPreviewOpenEl) wikiPreviewOpenEl.href = u;
+    if (wikiPreviewEl) wikiPreviewEl.classList.remove('wiki-preview--has-thumb');
   }
 }
 
@@ -771,6 +777,15 @@ function initVoiceChat() {
       if (!lastWsError && code) {
         status = `Disconnected (${code})`;
         if (reason) status += `: ${reason}`;
+      }
+
+      // If Gemini Live closes with a policy/permissions error and we didn't receive a JSON error
+      // message, show a friendlier hint (the raw close reason can be very confusing).
+      if (!lastWsError && code === 1008) {
+        const r = (reason || '').toLowerCase();
+        if (r.includes('publisher model') || r.includes('policy violation')) {
+          status = 'Voice chat blocked by Gemini Live (model/permissions). Check Cloud Run logs + GEMINI_LIVE_MODEL.';
+        }
       }
       setVoiceChatState(status);
 
