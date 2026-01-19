@@ -9,6 +9,7 @@ import httpx
 from ..core.config import settings
 from ..llm.gemini_vertex import GeminiVertexClient
 from .quest_registry import find_quest_title_in_text
+from .store import RetrievedChunk
 
 
 @dataclass(frozen=True)
@@ -217,6 +218,76 @@ async def maybe_get_quest_videos(*, user_message: str) -> list[YouTubeVideo]:
 
     # Keep YouTube results OSRS-only.
     return [v for v in videos if _is_osrs_relevant(v)]
+
+
+async def quest_youtube_insight_chunks(*, user_message: str, max_videos: int = 3) -> list[RetrievedChunk]:
+    """Turn top YouTube quest videos into short paraphrased insight chunks.
+
+    This is designed for *citations* (Source N) and therefore avoids long verbatim transcript excerpts.
+    Requires YouTube API key. If Vertex isn't configured, it falls back to video descriptions.
+    """
+
+    if not settings.youtube_api_key:
+        return []
+
+    max_videos = max(1, min(int(max_videos), 5))
+
+    videos = await maybe_get_quest_videos(user_message=user_message)
+    if not videos:
+        return []
+
+    picked = videos[:max_videos]
+    out: list[RetrievedChunk] = []
+
+    # If Vertex isn't configured, we can still cite short descriptions (best-effort).
+    vertex_ok = bool(settings.google_cloud_project)
+
+    for v in picked:
+        title = v.title or "YouTube video"
+        channel = v.channel or ""
+        label = f"[YouTube] {title}" + (f" — {channel}" if channel else "")
+
+        base_desc = (v.description or "").strip()
+        if not base_desc:
+            base_desc = "OSRS quest guide video."
+
+        insights_text = base_desc
+
+        if vertex_ok:
+            transcript = await youtube_fetch_transcript(v.video_id)
+            # Even with Vertex, don't fail the whole run if transcript is unavailable.
+            if transcript:
+                prompt = (
+                    "You extract helpful gameplay insights from OSRS quest guide videos.\n"
+                    "Return ONLY a short plain-text list of 4-8 bullet points.\n"
+                    "Rules:\n"
+                    "- Paraphrase. Do NOT quote the transcript verbatim.\n"
+                    "- Focus on steps, requirements, common failure points, and tips.\n"
+                    "- Avoid filler and avoid community/meta opinions.\n\n"
+                    f"User question: {str(user_message or '').strip()}\n\n"
+                    f"Video title: {title}\n"
+                    f"Channel: {channel}\n"
+                    f"Description: {base_desc[:700]}\n\n"
+                    f"Transcript excerpt (for context only; do not quote): {transcript}\n"
+                )
+                try:
+                    insights = GeminiVertexClient().generate(prompt).text
+                    insights = re.sub(r"\s+", " ", (insights or "").strip())
+                    # Keep it compact for the source display.
+                    if insights:
+                        insights_text = insights[:1000]
+                except Exception:
+                    insights_text = base_desc
+
+        out.append(
+            RetrievedChunk(
+                text=insights_text,
+                url=v.url,
+                title=label,
+            )
+        )
+
+    return out
 
 
 def _extract_json_array(text: str) -> list | None:

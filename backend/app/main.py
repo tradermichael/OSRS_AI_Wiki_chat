@@ -26,7 +26,7 @@ from .rag.store import RAGStore
 from .rag.store import make_chunk_id
 from .rag.wiki_preview import fetch_wiki_preview
 from .rag.google_cse import url_to_title
-from .rag.youtube import quest_youtube_videos_with_summaries
+from .rag.youtube import quest_youtube_videos_with_summaries, quest_youtube_insight_chunks
 from .schemas import (
     CapturePayPalOrderResponse,
     ChatRequest,
@@ -1031,6 +1031,27 @@ async def _chat_impl(
         prefixes=prefixes,
     )
 
+    # Add YouTube-derived insights as additional citable sources (best-effort).
+    # This runs only when a YouTube API key is configured.
+    if quest_help and settings.youtube_api_key:
+        try:
+            await _status("Listening to a few quest guide videos for extra tips...")
+            yt_chunks = await quest_youtube_insight_chunks(
+                user_message=user_message,
+                max_videos=3,
+            )
+            if yt_chunks:
+                chunks = yt_chunks + (chunks or [])
+                prompt_chunks = _build_prompt_chunks(
+                    chunks=chunks,
+                    retrieval_seed=retrieval_seed,
+                    topic_hint=topic_hint,
+                    prefixes=prefixes,
+                )
+                actions.append("Added YouTube guide insights as sources.")
+        except Exception:
+            pass
+
     # If our stricter prompt filtering produced nothing but we do have some local chunks,
     # treat that as a weak retrieval and attempt a fresh wiki lookup.
     if (not prompt_chunks) and chunks and (not force_fresh):
@@ -1088,7 +1109,7 @@ async def _chat_impl(
         conversation_context=conversation_context,
         chunks=prompt_chunks,
         allowed_url_prefixes=prefixes,
-        allow_external_sources=bool(settings.web_scrape_enabled),
+        allow_external_sources=bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help)),
     )
 
     client = GeminiVertexClient()
@@ -1216,7 +1237,7 @@ async def _chat_impl(
                         conversation_context=conversation_context,
                         chunks=retry_prompt_chunks,
                         allowed_url_prefixes=prefixes,
-                        allow_external_sources=bool(settings.web_scrape_enabled),
+                        allow_external_sources=bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help)),
                     )
                     res = client.generate(retry_prompt)
                     prompt_chunks = retry_prompt_chunks
@@ -1247,7 +1268,7 @@ async def _chat_impl(
                     conversation_context=conversation_context,
                     chunks=retry_prompt_chunks,
                     allowed_url_prefixes=prefixes,
-                    allow_external_sources=bool(settings.web_scrape_enabled),
+                    allow_external_sources=bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help)),
                 )
                 res = client.generate(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
