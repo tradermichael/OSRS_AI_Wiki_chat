@@ -207,6 +207,8 @@ async def _chat_impl(
         phrases = (
             "do not know",
             "don't know",
+            "cannot tell",
+            "can't tell",
             "naught of",
             "cant find",
             "can't find",
@@ -1149,6 +1151,7 @@ async def _chat_impl(
         *,
         chunks: list,
         retrieval_seed: str,
+        user_question: str,
         topic_hint: str,
         prefixes: list[str],
         allow_external_sources: bool,
@@ -1157,6 +1160,10 @@ async def _chat_impl(
         # BUT: include multiple relevant excerpts from the same page so we don't miss terms
         # that appear later in the article.
         key_terms_for_prompt: list[str] = []
+        # Always include user-question terms so we don't overfit on a generic wiki page title
+        # (e.g., "Quest point cape") for community/opinion prompts.
+        if user_question:
+            key_terms_for_prompt.extend(extract_keywords(user_question, max_terms=14))
         if topic_hint:
             key_terms_for_prompt.extend(extract_keywords(topic_hint, max_terms=6))
         key_terms_for_prompt.extend(extract_keywords(retrieval_seed, max_terms=10))
@@ -1220,7 +1227,8 @@ async def _chat_impl(
             ranked_urls = text_nonzero if text_nonzero else [u for (u, _ts, _cs) in ranked]
 
         prompt_chunks: list = []
-        for u in ranked_urls[:6]:
+        ranked_urls = ranked_urls[:6]
+        for u in ranked_urls:
             cs = url_to_chunks.get(u) or []
             if not cs:
                 continue
@@ -1249,6 +1257,45 @@ async def _chat_impl(
                 )
             )
 
+        # If external sources are allowed and we have any, ensure at least one makes it
+        # into the prompt. This prevents a single generic wiki page from crowding out
+        # community sources for questions like "which quests do people save for last".
+        if allow_external_sources and prefixes_t:
+            has_external_anywhere = any(
+                (getattr(c, "url", "") or "").strip() and not (getattr(c, "url", "") or "").strip().startswith(prefixes_t)
+                for c in (chunks or [])
+            )
+            has_external_in_prompt = any(
+                (getattr(c, "url", "") or "").strip() and not (getattr(c, "url", "") or "").strip().startswith(prefixes_t)
+                for c in (prompt_chunks or [])
+            )
+            if has_external_anywhere and (not has_external_in_prompt):
+                ext_urls = [u for u in ranked_urls if u and not u.startswith(prefixes_t)]
+                if not ext_urls:
+                    ext_urls = [u for u in url_to_chunks.keys() if u and not u.startswith(prefixes_t)]
+                if ext_urls:
+                    u = ext_urls[0]
+                    cs = url_to_chunks.get(u) or []
+                    if cs:
+                        ranked_chunks = sorted(cs, key=lambda c: _text_score((getattr(c, "text", "") or "")), reverse=True)
+                        picked = ranked_chunks[:3]
+                        merged_text = "\n\n".join(
+                            ((getattr(c, "text", "") or "").strip())
+                            for c in picked
+                            if (getattr(c, "text", "") or "").strip()
+                        ).strip()
+                        if len(merged_text) > 2200:
+                            merged_text = merged_text[:2200] + "..."
+                        ext_chunk = type(cs[0])(
+                            text=merged_text or (getattr(cs[0], "text", "") or ""),
+                            url=u,
+                            title=getattr(cs[0], "title", None),
+                        )
+                        if prompt_chunks:
+                            prompt_chunks[-1] = ext_chunk
+                        else:
+                            prompt_chunks.append(ext_chunk)
+
         return prompt_chunks
 
     allow_external_sources = bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help) or used_web_snippets)
@@ -1259,6 +1306,7 @@ async def _chat_impl(
     prompt_chunks = _build_prompt_chunks(
         chunks=chunks,
         retrieval_seed=retrieval_seed,
+        user_question=(raw_user_message or user_message or ""),
         topic_hint=topic_hint,
         prefixes=prefixes,
         allow_external_sources=allow_external_sources,
@@ -1280,6 +1328,7 @@ async def _chat_impl(
                 prompt_chunks = _build_prompt_chunks(
                     chunks=chunks,
                     retrieval_seed=retrieval_seed,
+                    user_question=(raw_user_message or user_message or ""),
                     topic_hint=topic_hint,
                     prefixes=prefixes,
                     allow_external_sources=allow_external_sources,
@@ -1303,6 +1352,7 @@ async def _chat_impl(
                 prompt_chunks = _build_prompt_chunks(
                     chunks=chunks,
                     retrieval_seed=retrieval_seed,
+                    user_question=(raw_user_message or user_message or ""),
                     topic_hint=topic_hint,
                     prefixes=prefixes,
                     allow_external_sources=allow_external_sources,
@@ -1329,6 +1379,7 @@ async def _chat_impl(
                 prompt_chunks = _build_prompt_chunks(
                     chunks=chunks,
                     retrieval_seed=retrieval_seed,
+                    user_question=(raw_user_message or user_message or ""),
                     topic_hint=topic_hint,
                     prefixes=prefixes,
                     allow_external_sources=allow_external_sources,
@@ -1499,6 +1550,7 @@ async def _chat_impl(
                 retry_prompt_chunks = _build_prompt_chunks(
                     chunks=live_chunks,
                     retrieval_seed=retry_seed,
+                    user_question=(raw_user_message or user_message or ""),
                     topic_hint=topic_hint,
                     prefixes=prefixes,
                     allow_external_sources=allow_external_sources,
@@ -1531,6 +1583,7 @@ async def _chat_impl(
             retry_prompt_chunks = _build_prompt_chunks(
                 chunks=retry_chunks,
                 retrieval_seed=retry_seed,
+                user_question=(raw_user_message or user_message or ""),
                 topic_hint=topic_hint,
                 prefixes=prefixes,
                 allow_external_sources=allow_external_sources,

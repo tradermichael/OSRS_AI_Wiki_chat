@@ -11,6 +11,9 @@ const viewBannerEl = document.getElementById('viewBanner');
 const viewBannerTextEl = document.getElementById('viewBannerText');
 const resumeChatBtn = document.getElementById('resumeChat');
 
+const voiceToggleBtn = document.getElementById('voiceToggle');
+const voiceStatusEl = document.getElementById('voiceStatus');
+
 const wikiPreviewEl = document.getElementById('wikiPreview');
 const wikiPreviewTitleEl = document.getElementById('wikiPreviewTitle');
 const wikiPreviewOpenEl = document.getElementById('wikiPreviewOpen');
@@ -23,6 +26,8 @@ const BOT_AVATAR_SRC = '/static/Wise_Old_Man_chathead.png';
 
 let liveChatSnapshot = null;
 let viewingHistoryId = null;
+
+let voice = null;
 
 const SESSION_ID_KEY = 'osrs_session_id';
 const LIVE_CHAT_KEY = 'osrs_live_chat_v1';
@@ -433,6 +438,140 @@ function setComposerEnabled(enabled) {
   input.disabled = !enabled;
   const btn = form.querySelector('button[type="submit"]') || form.querySelector('button');
   if (btn) btn.disabled = !enabled;
+
+  if (voiceToggleBtn) voiceToggleBtn.disabled = !enabled;
+  if (!enabled && voice && typeof voice.stop === 'function') {
+    voice.stop();
+  }
+}
+
+function setVoiceStatus(text) {
+  if (!voiceStatusEl) return;
+  const t = String(text || '').trim();
+  voiceStatusEl.textContent = t;
+  voiceStatusEl.hidden = !t;
+}
+
+function setVoiceBtnState(listening) {
+  if (!voiceToggleBtn) return;
+  const on = Boolean(listening);
+  voiceToggleBtn.classList.toggle('is-listening', on);
+  const label = on ? 'Stop voice input' : 'Voice input';
+  voiceToggleBtn.title = label;
+  voiceToggleBtn.setAttribute('aria-label', label);
+}
+
+function initVoiceInput() {
+  if (!voiceToggleBtn || !input) return;
+
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    voiceToggleBtn.hidden = true;
+    setVoiceStatus('');
+    return;
+  }
+
+  const recognition = new SpeechRecognition();
+  recognition.continuous = false;
+  recognition.interimResults = true;
+  recognition.maxAlternatives = 1;
+  recognition.lang = (navigator && navigator.language) ? navigator.language : 'en-US';
+
+  let listening = false;
+  let baseText = '';
+
+  function start() {
+    if (listening) return;
+    if (input.disabled) return;
+
+    baseText = (input.value || '').trim();
+    try {
+      recognition.start();
+      listening = true;
+      setVoiceBtnState(true);
+      setVoiceStatus('Listening…');
+      input.focus();
+    } catch {
+      // Some browsers throw if start() is called too quickly.
+      listening = false;
+      setVoiceBtnState(false);
+    }
+  }
+
+  function stop() {
+    if (!listening) {
+      setVoiceBtnState(false);
+      setVoiceStatus('');
+      return;
+    }
+    try {
+      recognition.stop();
+    } catch {
+      // ignore
+    }
+    listening = false;
+    setVoiceBtnState(false);
+    setVoiceStatus('');
+  }
+
+  recognition.addEventListener('result', (e) => {
+    let interim = '';
+    let finalText = '';
+
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const res = e.results[i];
+      const t = (res && res[0] && res[0].transcript) ? String(res[0].transcript) : '';
+      if (!t) continue;
+      if (res.isFinal) finalText += t;
+      else interim += t;
+    }
+
+    const parts = [];
+    if (baseText) parts.push(baseText);
+    const combined = (finalText + interim).trim();
+    if (combined) parts.push(combined);
+
+    input.value = parts.join(baseText ? ' ' : '');
+  });
+
+  recognition.addEventListener('start', () => {
+    listening = true;
+    setVoiceBtnState(true);
+    setVoiceStatus('Listening…');
+  });
+
+  recognition.addEventListener('end', () => {
+    listening = false;
+    setVoiceBtnState(false);
+    setVoiceStatus('');
+  });
+
+  recognition.addEventListener('error', (e) => {
+    const code = e && e.error ? String(e.error) : '';
+    if (code === 'not-allowed' || code === 'service-not-allowed') {
+      setVoiceStatus('Microphone permission denied.');
+    } else if (code === 'no-speech') {
+      setVoiceStatus('No speech detected.');
+      setTimeout(() => setVoiceStatus(''), 1200);
+    } else {
+      setVoiceStatus('Voice input error.');
+    }
+    listening = false;
+    setVoiceBtnState(false);
+  });
+
+  voiceToggleBtn.addEventListener('click', () => {
+    if (input.disabled) return;
+    if (listening) stop();
+    else start();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stop();
+  });
+
+  voice = { stop };
+  setVoiceBtnState(false);
 }
 
 function enterHistoryView(item) {
@@ -723,6 +862,7 @@ document.addEventListener('DOMContentLoaded', () => {
     appLayoutEl.classList.add('sidebar-collapsed');
   }
   setFullscreenBtnState();
+  initVoiceInput();
   loadHistory();
 });
 

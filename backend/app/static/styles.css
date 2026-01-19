@@ -699,8 +699,34 @@ body {
 
 .composer {
   display: flex;
+  align-items: center;
   gap: 10px;
   margin-top: 10px;
+}
+
+.voice-btn {
+  padding: 12px;
+  min-width: 46px;
+  line-height: 0;
+  display: inline-grid;
+  place-items: center;
+}
+
+.voice-btn svg {
+  display: block;
+}
+
+.voice-btn.is-listening {
+  border-color: rgba(255, 205, 205, 0.65);
+  background: linear-gradient(180deg, rgba(255, 140, 140, 0.96), rgba(190, 55, 55, 0.92));
+  color: rgba(10, 8, 6, 0.98);
+  box-shadow: 0 10px 22px rgba(120, 20, 20, 0.35);
+}
+
+.voice-status {
+  margin-top: 8px;
+  font-size: 14px;
+  color: rgba(33, 25, 16, 0.75);
 }
 
 .composer input {
