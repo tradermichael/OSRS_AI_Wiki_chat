@@ -621,6 +621,41 @@ async def _chat_impl(
         if status_cb:
             await status_cb(msg)
 
+    def _looks_truncated_answer(text: str) -> bool:
+        t = (text or "").strip()
+        if not t:
+            return True
+
+        # If the model stops mid-sentence on a short reply, retry once.
+        terminal = ".!?…\"')}]}"
+        if len(t) <= 260 and (t[-1] not in terminal):
+            if t.endswith((":", ",", ";", " -", "–", "—")):
+                return True
+            last = (t.split()[-1] if t.split() else "").lower().strip("\"'`.,;:!?()[]{}")
+            if last in {"of", "and", "or", "to", "for", "with", "in", "on", "at", "from", "by", "as", "but"}:
+                return True
+
+        # Unbalanced parens/quotes can also indicate a cutoff.
+        if len(t) <= 400:
+            if t.count("(") > t.count(")"):
+                return True
+            if t.count("\"") % 2 == 1 and t.count("\"") <= 7:
+                return True
+
+        return False
+
+    def _generate_with_retry(prompt: str, *, temperature: float = 0.2, max_output_tokens: int = 1024):
+        client = GeminiVertexClient()
+        res = client.generate(prompt, temperature=temperature, max_output_tokens=max_output_tokens)
+        if _looks_truncated_answer(res.text):
+            actions.append("Model output looked cut off; retried generation.")
+            repair_prompt = (
+                prompt
+                + "\n\nIMPORTANT: Your previous answer was cut off mid-thought. Answer again fully, ending with a complete sentence."
+            )
+            res = client.generate(repair_prompt, temperature=temperature, max_output_tokens=max(1536, max_output_tokens))
+        return res
+
     def _has_source_citations(text: str) -> bool:
         import re
 
@@ -2054,10 +2089,9 @@ async def _chat_impl(
         allow_best_effort=bool(opinion_question or difficulty_question),
     )
 
-    client = GeminiVertexClient()
     try:
         await _status("Consulting my crystal ball (Gemini)...")
-        res = client.generate(prompt)
+        res = _generate_with_retry(prompt)
     except Exception as exc:
         # For local development, keep the endpoint usable even if Vertex isn't configured.
         fallback = (
@@ -2184,7 +2218,7 @@ async def _chat_impl(
                         allow_external_sources=bool(allow_external_sources),
                         allow_best_effort=bool(opinion_question or difficulty_question),
                     )
-                    res = client.generate(retry_prompt)
+                    res = _generate_with_retry(retry_prompt)
                     prompt_chunks = retry_prompt_chunks
                     actions.append("Regenerated answer after judge-triggered retrieval.")
         except Exception:
@@ -2218,7 +2252,7 @@ async def _chat_impl(
                     allow_external_sources=bool(allow_external_sources),
                     allow_best_effort=bool(opinion_question or difficulty_question),
                 )
-                res = client.generate(retry_prompt)
+                res = _generate_with_retry(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
                 actions.append("Rewrote the answer using refreshed sources.")
         except Exception:
@@ -2260,7 +2294,7 @@ async def _chat_impl(
                                 allow_external_sources=bool(allow_external_sources),
                                 allow_best_effort=bool(opinion_question or difficulty_question),
                             )
-                            res = client.generate(focus_prompt)
+                            res = _generate_with_retry(focus_prompt)
                             prompt_chunks = focus_prompt_chunks
                             actions.append(f"Follow-up retrieval: added focused wiki excerpts for {picked_quest}.")
                             did_focus_followup = True
