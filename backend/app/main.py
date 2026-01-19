@@ -28,7 +28,7 @@ from .rag.store import make_chunk_id
 from .rag.store import RetrievedChunk
 from .rag.wiki_preview import fetch_wiki_preview
 from .rag.google_cse import url_to_title
-from .rag.youtube import quest_youtube_videos_with_summaries, quest_youtube_insight_chunks
+from .rag.youtube import quest_youtube_videos_with_summaries, quest_youtube_insight_chunks, opinion_youtube_insight_chunks
 from .schemas import (
     CapturePayPalOrderResponse,
     ChatRequest,
@@ -188,6 +188,7 @@ async def _chat_impl(
     web_query: str | None = None
     web_results: list[WebSearchResult] = []
     used_web_snippets = False
+    used_youtube_sources = False
 
     async def _status(msg: str) -> None:
         if status_cb:
@@ -1252,6 +1253,9 @@ async def _chat_impl(
 
     allow_external_sources = bool(settings.web_scrape_enabled or (settings.youtube_api_key and quest_help) or used_web_snippets)
 
+    # We'll allow external sources only if we actually add some (web snippets, scraped pages, or YouTube).
+    allow_external_sources = bool(settings.web_scrape_enabled or used_web_snippets or used_youtube_sources)
+
     prompt_chunks = _build_prompt_chunks(
         chunks=chunks,
         retrieval_seed=retrieval_seed,
@@ -1270,7 +1274,9 @@ async def _chat_impl(
                 max_videos=3,
             )
             if yt_chunks:
+                used_youtube_sources = True
                 chunks = yt_chunks + (chunks or [])
+                allow_external_sources = bool(settings.web_scrape_enabled or used_web_snippets or used_youtube_sources)
                 prompt_chunks = _build_prompt_chunks(
                     chunks=chunks,
                     retrieval_seed=retrieval_seed,
@@ -1279,6 +1285,29 @@ async def _chat_impl(
                     allow_external_sources=allow_external_sources,
                 )
                 actions.append("Added YouTube guide insights as sources.")
+        except Exception:
+            pass
+
+    # Opinion/community questions: YouTube creators often have useful takes.
+    if opinion_question and settings.youtube_api_key:
+        try:
+            await _status("Consulting a few OSRS videos for community takes...")
+            yt_chunks = await opinion_youtube_insight_chunks(
+                user_message=user_message,
+                max_videos=2,
+            )
+            if yt_chunks:
+                used_youtube_sources = True
+                chunks = yt_chunks + (chunks or [])
+                allow_external_sources = bool(settings.web_scrape_enabled or used_web_snippets or used_youtube_sources)
+                prompt_chunks = _build_prompt_chunks(
+                    chunks=chunks,
+                    retrieval_seed=retrieval_seed,
+                    topic_hint=topic_hint,
+                    prefixes=prefixes,
+                    allow_external_sources=allow_external_sources,
+                )
+                actions.append("Added YouTube community takes as sources.")
         except Exception:
             pass
 

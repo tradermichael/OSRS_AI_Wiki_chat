@@ -91,6 +91,19 @@ def build_osrs_quest_guide_query(user_message: str) -> str:
     return f"osrs \"old school runescape\" {q} guide"
 
 
+def build_osrs_opinion_video_query(user_message: str) -> str:
+    """Build a YouTube query for opinion/community topics.
+
+    Intended for prompts like "hardest skill cape", "most prestigious cape", etc.
+    """
+
+    q = _normalize_query(user_message)
+    if not q:
+        return ""
+    # Bias toward OSRS + discussion/takes.
+    return f"osrs \"old school runescape\" {q} opinions"
+
+
 _OSRS_POSITIVE_MARKERS = (
     "osrs",
     "old school runescape",
@@ -218,6 +231,93 @@ async def maybe_get_quest_videos(*, user_message: str) -> list[YouTubeVideo]:
 
     # Keep YouTube results OSRS-only.
     return [v for v in videos if _is_osrs_relevant(v)]
+
+
+async def maybe_get_opinion_videos(*, user_message: str) -> list[YouTubeVideo]:
+    """Fetch OSRS-relevant YouTube videos for opinion/community questions."""
+
+    api_key = settings.youtube_api_key
+    if not api_key:
+        return []
+
+    q = build_osrs_opinion_video_query(user_message)
+    if not q:
+        return []
+
+    videos = await youtube_search_videos(
+        api_key=api_key,
+        query=q,
+        max_results=settings.youtube_max_results,
+    )
+    return [v for v in videos if _is_osrs_relevant(v)]
+
+
+async def opinion_youtube_insight_chunks(*, user_message: str, max_videos: int = 3) -> list[RetrievedChunk]:
+    """Turn top OSRS YouTube videos into short paraphrased opinion insight chunks.
+
+    Designed for citations (Source N). Avoids long verbatim transcript excerpts.
+    If Vertex isn't configured, falls back to video descriptions.
+    """
+
+    if not settings.youtube_api_key:
+        return []
+
+    max_videos = max(1, min(int(max_videos), 5))
+
+    videos = await maybe_get_opinion_videos(user_message=user_message)
+    if not videos:
+        return []
+
+    picked = videos[:max_videos]
+    out: list[RetrievedChunk] = []
+
+    vertex_ok = bool(settings.google_cloud_project)
+
+    for v in picked:
+        title = v.title or "YouTube video"
+        channel = v.channel or ""
+        label = f"[YouTube] {title}" + (f" — {channel}" if channel else "")
+
+        base_desc = (v.description or "").strip()
+        if not base_desc:
+            base_desc = "OSRS community/opinion video."
+
+        insights_text = base_desc
+
+        if vertex_ok:
+            transcript = await youtube_fetch_transcript(v.video_id)
+            if transcript:
+                prompt = (
+                    "You extract community/opinion insights from OSRS videos.\n"
+                    "Return ONLY a short plain-text list of 4-8 bullet points.\n"
+                    "Rules:\n"
+                    "- Paraphrase. Do NOT quote the transcript verbatim.\n"
+                    "- Focus on opinions, common takes, pros/cons, and points of disagreement.\n"
+                    "- Be clear when something is subjective.\n"
+                    "- Avoid claiming hard facts unless the transcript clearly states them.\n\n"
+                    f"User question: {str(user_message or '').strip()}\n\n"
+                    f"Video title: {title}\n"
+                    f"Channel: {channel}\n"
+                    f"Description: {base_desc[:700]}\n\n"
+                    f"Transcript excerpt (for context only; do not quote): {transcript}\n"
+                )
+                try:
+                    insights = GeminiVertexClient().generate(prompt).text
+                    insights = re.sub(r"\s+", " ", (insights or "").strip())
+                    if insights:
+                        insights_text = insights[:1000]
+                except Exception:
+                    insights_text = base_desc
+
+        out.append(
+            RetrievedChunk(
+                text=insights_text,
+                url=v.url,
+                title=label,
+            )
+        )
+
+    return out
 
 
 async def quest_youtube_insight_chunks(*, user_message: str, max_videos: int = 3) -> list[RetrievedChunk]:
