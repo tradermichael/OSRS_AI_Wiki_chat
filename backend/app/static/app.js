@@ -1409,8 +1409,12 @@ if (messagesEl) {
 document.addEventListener('DOMContentLoaded', () => {
   // Sidebar toggle state
   const open = localStorage.getItem(HISTORY_SIDEBAR_KEY);
-  if (appLayoutEl && open === '0') {
+  // Hide public chat log by default unless user explicitly opened it.
+  // Stored values: '1' = open, '0' = collapsed.
+  const shouldCollapse = (open !== '1');
+  if (appLayoutEl && shouldCollapse) {
     appLayoutEl.classList.add('sidebar-collapsed');
+    if (open == null) localStorage.setItem(HISTORY_SIDEBAR_KEY, '0');
   }
   setFullscreenBtnState();
   initVoiceInput();
