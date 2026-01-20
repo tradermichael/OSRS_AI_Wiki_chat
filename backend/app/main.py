@@ -477,25 +477,27 @@ async def gemini_live_websocket(ws: WebSocket):
     # Configure realtime input with automatic Voice Activity Detection (VAD)
     # This makes it feel like a real phone call - Gemini detects when you stop talking
     realtime_input_config = types.RealtimeInputConfig(
-        automatic_activity_detection=types.AutomaticActivityDetection(
+        automaticActivityDetection=types.AutomaticActivityDetection(
             disabled=False,  # Enable VAD
             silenceDurationMs=1500,  # Wait 1.5s of silence before considering speech ended
         ),
         # CRITICAL for multi-turn: include ALL input, not just first activity
-        turn_coverage=types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
+        turnCoverage=types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
         # Allow user to interrupt the AI while it's speaking
-        activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+        activityHandling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
     )
 
     # Gemini Live currently allows at most one response modality in the setup request.
     # We use AUDIO for voice chat, and enable transcripts via input/output_audio_transcription.
     connect_config = types.LiveConnectConfig(
-        response_modalities=[types.Modality.AUDIO],
-        system_instruction=system_instruction,
-        input_audio_transcription=types.AudioTranscriptionConfig(),
-        output_audio_transcription=types.AudioTranscriptionConfig(),
-        speech_config=speech_config,
-        realtime_input_config=realtime_input_config,
+        responseModalities=[types.Modality.AUDIO],
+        systemInstruction=system_instruction,
+        inputAudioTranscription=types.AudioTranscriptionConfig(),
+        outputAudioTranscription=types.AudioTranscriptionConfig(),
+        speechConfig=speech_config,
+        realtimeInputConfig=realtime_input_config,
+        # Enable transparent session resumption for multi-turn conversation
+        sessionResumption=types.SessionResumptionConfig(transparent=True),
     )
 
     # Create client and connect.
@@ -563,25 +565,41 @@ async def gemini_live_websocket(ws: WebSocket):
     async def _pump_from_gemini(session) -> None:
         logger.info("Starting to pump messages from Gemini Live")
         message_count = 0
+        last_turn_complete_at = 0
         try:
             async for message in session.receive():
                 message_count += 1
                 msg_type = type(message).__name__
                 
+                # Log all message types to understand session lifecycle
+                logger.info("Gemini Live message #%d: type=%s", message_count, msg_type)
+                
                 # Check for go_away or session termination signals
                 go_away = getattr(message, "go_away", None)
                 if go_away is not None:
-                    logger.warning("Gemini Live go_away received: %s", go_away)
+                    logger.warning("Gemini Live GO_AWAY received: %s", go_away)
+                    # Send to client so we know why session is ending
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"type": "go_away", "detail": str(go_away)})
                 
                 # Check for setup_complete (indicates session is ready for multi-turn)
                 setup_complete = getattr(message, "setup_complete", None)
                 if setup_complete is not None:
-                    logger.info("Gemini Live setup_complete received - session ready for multi-turn")
+                    logger.info("Gemini Live SETUP_COMPLETE received - session ready for multi-turn")
+                    with contextlib.suppress(Exception):
+                        await ws.send_json({"type": "setup_complete"})
+                
+                # Check for session resumption updates
+                session_resumption_update = getattr(message, "session_resumption_update", None)
+                if session_resumption_update is not None:
+                    logger.info("Gemini Live SESSION_RESUMPTION_UPDATE: %s", session_resumption_update)
                 
                 sc = getattr(message, "server_content", None)
                 if sc is not None:
                     is_turn_complete = bool(getattr(sc, "turn_complete", False))
-                    logger.info("Gemini Live server_content #%d: turn_complete=%s", message_count, is_turn_complete)
+                    if is_turn_complete:
+                        last_turn_complete_at = message_count
+                        logger.info("Gemini Live TURN_COMPLETE at message #%d", message_count)
                     await _send_server_content(sc)
 
                 # Some SDK versions expose a convenience text field.
@@ -590,9 +608,10 @@ async def gemini_live_websocket(ws: WebSocket):
                     await ws.send_json({"type": "model_text", "text": msg_text})
             
             # If we reach here, the Gemini session ended normally (timeout/disconnect)
-            logger.warning("Gemini Live session receive() iterator ended after %d messages - session closed by server", message_count)
+            logger.warning("Gemini Live session ENDED after %d messages (last turn_complete at #%d)", 
+                          message_count, last_turn_complete_at)
             with contextlib.suppress(Exception):
-                await ws.send_json({"type": "session_ended", "detail": "Gemini Live session ended (inactivity timeout)"})
+                await ws.send_json({"type": "session_ended", "detail": f"Session ended after {message_count} messages"})
         except asyncio.CancelledError:
             logger.info("Gemini Live pump task cancelled after %d messages", message_count)
             raise
