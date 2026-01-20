@@ -806,6 +806,8 @@ async def _chat_impl(
         difficulty_question: bool,
         strategy_followup: bool,
         quest_help: bool,
+        new_player_intent: bool,
+        skill_training: bool,
     ) -> tuple[Any, list[RetrievedChunk], str | None, list[WebSearchResult]]:
         """Optional second pass: if the judge is unconvinced, do broader retrieval and regenerate once."""
 
@@ -919,7 +921,14 @@ async def _chat_impl(
                     chunks=retry_prompt_chunks,
                     allowed_url_prefixes=prefixes,
                     allow_external_sources=bool(retry_allow_external),
-                    allow_best_effort=bool(opinion_question or difficulty_question or strategy_followup or quest_help),
+                    allow_best_effort=bool(
+                        opinion_question
+                        or difficulty_question
+                        or strategy_followup
+                        or quest_help
+                        or new_player_intent
+                        or skill_training
+                    ),
                 )
                 res = _generate_with_retry(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
@@ -1376,6 +1385,103 @@ async def _chat_impl(
             )
         )
 
+    def _looks_like_new_player_question(message: str) -> bool:
+        m = (message or "").lower()
+        return any(
+            p in m
+            for p in (
+                "first character",
+                "new character",
+                "new player",
+                "brand new",
+                "just started",
+                "starting out",
+                "beginner",
+                "tutorial island",
+                "account type",
+                "account types",
+                "ironman",
+                "hardcore ironman",
+                "ultimate ironman",
+                "group ironman",
+            )
+        )
+
+    def _looks_like_skill_training_question(message: str) -> bool:
+        m = (message or "").lower()
+        if not m:
+            return False
+
+        if any(p in m for p in ("level", "lvl", "xp", "experience", "training", "train ", "grind")):
+            return True
+
+        skills = (
+            "attack",
+            "strength",
+            "defence",
+            "hitpoints",
+            "ranged",
+            "magic",
+            "prayer",
+            "runecraft",
+            "runecrafting",
+            "construction",
+            "agility",
+            "herblore",
+            "thieving",
+            "crafting",
+            "fletching",
+            "slayer",
+            "hunter",
+            "mining",
+            "smithing",
+            "fishing",
+            "cooking",
+            "firemaking",
+            "woodcutting",
+            "farming",
+        )
+        return any(s in m for s in skills) and any(p in m for p in ("train", "training", "level", "xp", "best way", "fastest", "afk"))
+
+    def _apply_intent_hints(*, base_question: str, new_player_intent: bool, quest_help: bool, strategy_followup: bool, skill_training: bool) -> str:
+        q = (base_question or "").strip()
+        if not q:
+            return q
+
+        hints: list[str] = []
+
+        if new_player_intent:
+            hints.append(
+                "New player/setup intent: list the main options a brand-new OSRS account can choose (and what each implies). "
+                "Give 4-7 concrete options with short pros/cons and a suggested default. "
+                "Examples of option categories: account mode (regular vs Ironman variants), onboarding path (Tutorial Island/Adventure Paths), "
+                "membership vs F2P, early goals/questing direction."
+            )
+
+        if quest_help:
+            hints.append(
+                "Quest-help intent: provide requirements (stats/items/quests), key steps/checkpoints, and common pitfalls. "
+                "If there's a /Quick guide or /Walkthrough, prefer it."
+            )
+
+        if strategy_followup:
+            hints.append(
+                "Combat/strategy intent: answer as a practical plan (setup → inventory/gear → mechanics/phases → survival tips). "
+                "If the user didn't provide stats/gear, ask 1-2 quick questions at the end to tailor the plan."
+            )
+
+        if skill_training:
+            hints.append(
+                "Skill-training intent: give multiple training options (fast vs cheap vs AFK), include level brackets when possible, "
+                "and call out key unlocks/quests that speed training. End with a simple recommended path based on the user's likely constraints."
+            )
+
+        if not hints:
+            return q
+
+        # Keep this short and directive; the UI will render markdown-like bullets.
+        return q + "\n\nAnswering hints:\n- " + "\n- ".join(hints)
+
     def _is_followup_more_request(message: str) -> bool:
         """Return True when the user is asking for more detail, not a new topic."""
         import re
@@ -1505,6 +1611,8 @@ async def _chat_impl(
 
     strategy_followup = bool(topic_hint and _looks_like_strategy_question(user_message))
     quest_help = bool(topic_hint and _looks_like_quest_help_question(user_message))
+    new_player_intent = _looks_like_new_player_question(user_message)
+    skill_training = _looks_like_skill_training_question(user_message)
 
     # Difficulty/"hardest" questions are often hybrid: part community consensus, part practical help.
     # Treat them as opinion/community even if an intent classifier leans "gameplay".
@@ -1531,6 +1639,22 @@ async def _chat_impl(
     if followup_more:
         # Avoid serving the same cached answer; user explicitly asked for more.
         force_fresh = True
+
+    if new_player_intent:
+        force_fresh = True
+        actions.append("New-player/setup question detected; favored onboarding sources.")
+    if skill_training:
+        force_fresh = True
+        actions.append("Skill training/leveling question detected; favored training-method sources.")
+
+    if not followup_more:
+        prompt_user_message = _apply_intent_hints(
+            base_question=prompt_user_message,
+            new_player_intent=new_player_intent,
+            quest_help=quest_help,
+            strategy_followup=strategy_followup,
+            skill_training=skill_training,
+        )
 
     opinion_question = _looks_like_opinion_or_community_question(user_message)
     # LLM intent classification (best-effort): helps distinguish consensus questions from factual wiki questions.
@@ -2436,6 +2560,21 @@ async def _chat_impl(
         await _status("My shelves come up empty; no citable pages found.")
         if strategy_followup and ("seren" in msg_l or "fragment" in msg_l or "song of the elves" in msg_l):
             fallback = _best_effort_fragment_of_seren_plan()
+        elif new_player_intent:
+            fallback = (
+                "(best effort; not sourced) If you’re setting up a brand-new OSRS account, here are the main choices that matter up front:\n\n"
+                "- Account mode: Regular (recommended) vs Ironman/HCIM/UIM (self-sufficient challenge modes).\n"
+                "- Onboarding path: do Tutorial Island, then consider Adventure Paths / early quests for direction.\n"
+                "- F2P vs members: members unlocks faster training, travel, and early quest rewards.\n"
+                "- Early goal: questing unlocks (teleports, stamina quality-of-life) vs pure skilling vs combat.\n\n"
+                "If you tell me (1) F2P or members and (2) whether you want Ironman or regular, I’ll suggest a simple first-week plan."
+            )
+        elif skill_training:
+            fallback = (
+                "(best effort; not sourced) I couldn’t fetch citable training pages just now, but I can still help.\n\n"
+                "Tell me which skill you’re leveling, your current level, and whether you prefer fast XP, cheap, or AFK. "
+                "I’ll give you a level-bracketed path (fast/cheap/AFK options) plus key unlocks/quests to speed it up."
+            )
         elif opinion_question or difficulty_question:
             fallback = (
                 "I couldn't fetch citable pages for that just now, my friend — but I can still help. "
@@ -2492,7 +2631,14 @@ async def _chat_impl(
         chunks=prompt_chunks,
         allowed_url_prefixes=prefixes,
         allow_external_sources=bool(allow_external_sources),
-        allow_best_effort=bool(opinion_question or difficulty_question or strategy_followup or quest_help),
+        allow_best_effort=bool(
+            opinion_question
+            or difficulty_question
+            or strategy_followup
+            or quest_help
+            or new_player_intent
+            or skill_training
+        ),
     )
 
     try:
@@ -2552,6 +2698,8 @@ async def _chat_impl(
         difficulty_question=bool(difficulty_question),
         strategy_followup=bool(strategy_followup),
         quest_help=bool(quest_help),
+        new_player_intent=bool(new_player_intent),
+        skill_training=bool(skill_training),
     )
 
     # If the model effectively said "I don't know" (including the roleplay variants), do one retry
@@ -2579,7 +2727,14 @@ async def _chat_impl(
                     chunks=retry_prompt_chunks,
                     allowed_url_prefixes=prefixes,
                     allow_external_sources=bool(allow_external_sources),
-                    allow_best_effort=bool(opinion_question or difficulty_question),
+                    allow_best_effort=bool(
+                        opinion_question
+                        or difficulty_question
+                        or strategy_followup
+                        or quest_help
+                        or new_player_intent
+                        or skill_training
+                    ),
                 )
                 res = _generate_with_retry(retry_prompt)
                 prompt_chunks = retry_prompt_chunks
@@ -2621,7 +2776,14 @@ async def _chat_impl(
                                 chunks=focus_prompt_chunks,
                                 allowed_url_prefixes=prefixes,
                                 allow_external_sources=bool(allow_external_sources),
-                                allow_best_effort=bool(opinion_question or difficulty_question),
+                                allow_best_effort=bool(
+                                    opinion_question
+                                    or difficulty_question
+                                    or strategy_followup
+                                    or quest_help
+                                    or new_player_intent
+                                    or skill_training
+                                ),
                             )
                             res = _generate_with_retry(focus_prompt)
                             prompt_chunks = focus_prompt_chunks

@@ -706,6 +706,9 @@ function initVoiceChat() {
   let liveReady = false;
   let lastWsError = '';
   let inputTx = '';
+  let sentAudioThisTurn = false;
+  let readyWaitResolve = null;
+  let readyWaitTimer = null;
 
   let micStream = null;
   let micCtx = null;
@@ -720,6 +723,21 @@ function initVoiceChat() {
 
   let botBubble = null;
   let botText = '';
+
+  function waitForReady(timeoutMs = 8000) {
+    if (liveReady) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      readyWaitResolve = resolve;
+      if (readyWaitTimer) {
+        try { clearTimeout(readyWaitTimer); } catch { /* ignore */ }
+      }
+      readyWaitTimer = setTimeout(() => {
+        readyWaitTimer = null;
+        readyWaitResolve = null;
+        resolve(false);
+      }, Math.max(1000, Number(timeoutMs) || 8000));
+    });
+  }
 
   function setPanelOpen(open) {
     voiceChatPanelEl.hidden = !open;
@@ -761,6 +779,7 @@ function initVoiceChat() {
     lastWsError = '';
     setVoiceChatState('Connecting…');
     pushToTalkBtn.disabled = true;
+    pushToTalkBtn.textContent = 'Connecting…';
 
     ws = new WebSocket(WS_URL);
     ws.binaryType = 'arraybuffer';
@@ -769,7 +788,7 @@ function initVoiceChat() {
       connecting = false;
       setVoiceChatState('Connected. Starting session…');
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = false;
-      pushToTalkBtn.textContent = 'Hold to talk (release to get reply)';
+      pushToTalkBtn.textContent = 'Starting…';
       // Start the Live session.
       try {
         ws.send(JSON.stringify({
@@ -785,8 +804,18 @@ function initVoiceChat() {
 
       if (msg.type === 'ready') {
         liveReady = true;
-        setVoiceChatState('Connected. Hold to talk.');
+        setVoiceChatState('Connected. Click “Talk” to speak.');
         pushToTalkBtn.disabled = false;
+        pushToTalkBtn.textContent = 'Talk';
+        if (readyWaitResolve) {
+          const r = readyWaitResolve;
+          readyWaitResolve = null;
+          if (readyWaitTimer) {
+            try { clearTimeout(readyWaitTimer); } catch { /* ignore */ }
+            readyWaitTimer = null;
+          }
+          try { r(true); } catch { /* ignore */ }
+        }
         return;
       }
 
@@ -864,6 +893,7 @@ function initVoiceChat() {
 
       if (msg.type === 'turn_complete') {
         resetBotTurn();
+        if (ws && ws.readyState === WebSocket.OPEN) setVoiceChatState('Connected. Click “Talk” to speak.');
       }
     });
 
@@ -874,6 +904,7 @@ function initVoiceChat() {
       liveReady = false;
       pushToTalkBtn.disabled = true;
       pushToTalkBtn.classList.remove('is-talking');
+      pushToTalkBtn.textContent = 'Talk';
 
       const code = (evt && typeof evt.code === 'number') ? evt.code : null;
       const reason = (evt && evt.reason) ? String(evt.reason).trim() : '';
@@ -952,6 +983,7 @@ function initVoiceChat() {
 
           const pcm = downsampleFloat32ToInt16(f32, micCtx.sampleRate, 16000);
           if (!pcm || !pcm.length) return;
+          sentAudioThisTurn = true;
           try { ws.send(pcm.buffer); } catch { /* ignore */ }
         };
 
@@ -977,6 +1009,7 @@ function initVoiceChat() {
       const ch0 = e.inputBuffer.getChannelData(0);
       const pcm = downsampleFloat32ToInt16(ch0, micCtx.sampleRate, 16000);
       if (!pcm || !pcm.length) return;
+      sentAudioThisTurn = true;
       try {
         ws.send(pcm.buffer);
       } catch {
@@ -1009,18 +1042,21 @@ function initVoiceChat() {
   function startTalking() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     if (talking) return;
+    sentAudioThisTurn = false;
     talking = true;
     pushToTalkBtn.classList.add('is-talking');
-    pushToTalkBtn.textContent = 'Release to send';
+    pushToTalkBtn.textContent = 'Stop & send';
   }
 
   function stopTalking() {
     if (!talking) return;
     talking = false;
     pushToTalkBtn.classList.remove('is-talking');
-    pushToTalkBtn.textContent = 'Hold to talk';
+    pushToTalkBtn.textContent = 'Talk';
     try {
-      if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'audio_stream_end' }));
+      if (sentAudioThisTurn && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'audio_stream_end' }));
+      }
     } catch { /* ignore */ }
   }
 
@@ -1040,60 +1076,39 @@ function initVoiceChat() {
     voiceChatDisconnectBtn.addEventListener('click', () => disconnect());
   }
 
-  // Push-to-talk: use Pointer Events + pointer capture so holding is reliable
-  // and we don't need global mouseup/touchend listeners (which can fire in
-  // surprising ways and make PTT "flash").
-  let activePointerId = null;
-
-  pushToTalkBtn.addEventListener('pointerdown', async (e) => {
-    if (e.button != null && e.button !== 0) return; // left click only
-    if (activePointerId != null) return;
+  // Click-to-talk toggle (call-style): connect once, then talk/stop to send.
+  pushToTalkBtn.addEventListener('click', async (e) => {
+    e.preventDefault();
     if (input && input.disabled) return;
 
-    activePointerId = e.pointerId;
-    try { pushToTalkBtn.setPointerCapture(activePointerId); } catch { /* ignore */ }
-
-    // Only prevent default while interacting with PTT.
-    e.preventDefault();
-
-    // Start UI immediately; audio will stream as soon as ws+mic are ready.
-    startTalking();
-    setVoiceChatState('Listening…');
-
     try {
-      // Ensure we're connected and the mic processor is running.
       await connect();
       await setupMicIfNeeded();
+      const ok = await waitForReady(10000);
+      if (!ok) {
+        setVoiceChatState('Still connecting… try again in a second.');
+        return;
+      }
     } catch {
       setVoiceChatState('Microphone permission denied.');
-      stopTalking();
-      activePointerId = null;
-      try { pushToTalkBtn.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+      return;
     }
-  });
 
-  pushToTalkBtn.addEventListener('pointerup', (e) => {
-    if (activePointerId == null) return;
-    if (e.pointerId !== activePointerId) return;
-    e.preventDefault();
-    stopTalking();
-    try { pushToTalkBtn.releasePointerCapture(activePointerId); } catch { /* ignore */ }
-    activePointerId = null;
-    if (ws && ws.readyState === WebSocket.OPEN) setVoiceChatState('Connected. Hold to talk.');
-  });
-
-  pushToTalkBtn.addEventListener('pointercancel', (e) => {
-    if (activePointerId == null) return;
-    if (e.pointerId !== activePointerId) return;
-    stopTalking();
-    try { pushToTalkBtn.releasePointerCapture(activePointerId); } catch { /* ignore */ }
-    activePointerId = null;
+    if (!talking) {
+      startTalking();
+      setVoiceChatState('Listening… (click again to send)');
+    } else {
+      stopTalking();
+      if (sentAudioThisTurn) setVoiceChatState('Thinking…');
+      else setVoiceChatState('No audio captured. Click “Talk” and speak again.');
+    }
   });
 
   // Default UI state.
   setPanelOpen(false);
   setVoiceChatState('Voice chat is off.');
-  pushToTalkBtn.textContent = 'Hold to talk (release to get reply)';
+  pushToTalkBtn.textContent = 'Talk';
+  pushToTalkBtn.disabled = true;
 }
 
 function initVoiceInput() {

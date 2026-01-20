@@ -107,6 +107,34 @@ def derive_search_queries(user_message: str) -> list[str]:
 
     msg_l = msg.lower()
 
+    new_player_intent = any(
+        p in msg_l
+        for p in (
+            "first character",
+            "new character",
+            "new player",
+            "brand new",
+            "just started",
+            "starting out",
+            "beginner",
+            "tutorial island",
+            "account type",
+            "account types",
+            "ironman",
+            "hardcore ironman",
+            "ultimate ironman",
+            "group ironman",
+        )
+    )
+
+    # If the user is asking about setting up a first character, aggressively bias toward the
+    # actual onboarding pages (otherwise we often accidentally retrieve the generic Settings page).
+    if new_player_intent:
+        queries.append("New player guide")
+        queries.append("Tutorial Island")
+        queries.append("Ironman Mode")
+        queries.append("Adventure Paths")
+
     # Common OSRS naming: "Quest cape" is the "Quest point cape" page on the wiki.
     # Adding this early prevents unrelated boss/strategy pages from matching on generic terms like "quest"/"cape".
     if "quest cape" in msg_l and "quest point cape" not in msg_l:
@@ -145,6 +173,9 @@ def derive_search_queries(user_message: str) -> list[str]:
                 queries.append(f"{topic} boss fight")
 
     keys = _keywords(msg)
+    if new_player_intent:
+        # Avoid the word "setting" dominating search (it pulls the Settings page).
+        keys = [k for k in keys if k not in {"setting", "settings", "setup", "character", "runescape"}]
     if keys:
         key_q = " ".join(keys[:8])
         queries.append(key_q)

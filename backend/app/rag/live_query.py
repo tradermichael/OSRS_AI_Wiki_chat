@@ -107,6 +107,11 @@ def _title_score(*, title: str, query: str) -> int:
         if t.startswith("combat achievements"):
             score -= 120
 
+    # For onboarding/first-character questions, "Settings" is a common false-positive.
+    if any(p in qn for p in ("first character", "new player", "tutorial island", "starting out", "beginner")):
+        if t == "settings" or t.startswith("settings "):
+            score -= 140
+
     # Small preference for shorter titles when scores tie.
     score -= max(0, len(t) - 30) // 10
     return score
