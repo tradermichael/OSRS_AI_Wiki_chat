@@ -2670,10 +2670,59 @@ async def _chat_impl(
         url_to_thumb = {}
 
     sources: list[SourceChunk] = []
-    for c in prompt_chunks[:5]:
-        if not c.url:
+
+    def _is_youtube_url(u: str) -> bool:
+        ul = (u or "").lower()
+        return "youtube.com/" in ul or "youtu.be/" in ul
+
+    def _is_reddit_url(u: str) -> bool:
+        ul = (u or "").lower()
+        return "reddit.com/" in ul
+
+    prefix_tuple = tuple(prefixes or [])
+
+    # De-dupe by URL first, preserving order.
+    unique_chunks: list[RetrievedChunk] = []
+    seen_urls: set[str] = set()
+    for c in (prompt_chunks or []):
+        u = (getattr(c, "url", None) or "").strip()
+        if not u:
             continue
-        u = c.url
+        if u in seen_urls:
+            continue
+        seen_urls.add(u)
+        unique_chunks.append(c)
+
+    wiki_chunks = [c for c in unique_chunks if (getattr(c, "url", "") or "").startswith(prefix_tuple)]
+    yt_chunks = [c for c in unique_chunks if _is_youtube_url(getattr(c, "url", "") or "")]
+    reddit_chunks = [c for c in unique_chunks if _is_reddit_url(getattr(c, "url", "") or "")]
+    other_chunks = [c for c in unique_chunks if c not in wiki_chunks and c not in yt_chunks and c not in reddit_chunks]
+
+    picked: list[RetrievedChunk] = []
+
+    # Prefer wiki sources for factual grounding.
+    picked.extend(wiki_chunks[:4])
+
+    # If we have YouTube insights, ensure at least one shows up in citations.
+    if yt_chunks and all(not _is_youtube_url(getattr(c, "url", "") or "") for c in picked):
+        picked.append(yt_chunks[0])
+
+    # If we have Reddit, include at most one (community context).
+    if reddit_chunks and all(not _is_reddit_url(getattr(c, "url", "") or "") for c in picked) and len(picked) < 5:
+        picked.append(reddit_chunks[0])
+
+    # Fill remaining slots.
+    for c in other_chunks + wiki_chunks[4:] + yt_chunks[1:] + reddit_chunks[1:]:
+        if len(picked) >= 5:
+            break
+        if c in picked:
+            continue
+        picked.append(c)
+
+    for c in picked[:5]:
+        u = (c.url or "").strip()
+        if not u:
+            continue
         sources.append(
             SourceChunk(
                 title=c.title,

@@ -788,6 +788,34 @@ body {
   color: var(--chat-ink);
 }
 
+/* Basic markdown rendering inside chat bubbles */
+.msg .text p {
+  margin: 0 0 10px 0;
+}
+
+.msg .text p:last-child {
+  margin-bottom: 0;
+}
+
+.msg .text ul,
+.msg .text ol {
+  margin: 8px 0 8px 18px;
+  padding: 0;
+}
+
+.msg .text li {
+  margin: 4px 0;
+}
+
+.msg .text code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95em;
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(54, 42, 28, 0.25);
+  background: rgba(255, 255, 255, 0.35);
+}
+
 .typing {
   display: inline-flex;
   align-items: center;

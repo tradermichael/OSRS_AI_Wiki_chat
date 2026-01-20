@@ -93,10 +93,102 @@ function createRow(kind) {
   return { row, bubble };
 }
 
+function renderMarkdownToFragment(md) {
+  const src = String(md || '');
+  const frag = document.createDocumentFragment();
+  const lines = src.replace(/\r\n/g, '\n').split('\n');
+
+  function appendInline(parent, text) {
+    const s = String(text || '');
+    // Very small markdown subset: **bold**, *italic*, `code`.
+    // No HTML is interpreted; we create DOM nodes directly.
+    const re = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g;
+    let last = 0;
+    let m;
+    while ((m = re.exec(s)) !== null) {
+      if (m.index > last) parent.appendChild(document.createTextNode(s.slice(last, m.index)));
+      const token = m[0] || '';
+      if (token.startsWith('**') && token.endsWith('**') && token.length >= 4) {
+        const el = document.createElement('strong');
+        el.textContent = token.slice(2, -2);
+        parent.appendChild(el);
+      } else if (token.startsWith('`') && token.endsWith('`') && token.length >= 2) {
+        const el = document.createElement('code');
+        el.textContent = token.slice(1, -1);
+        parent.appendChild(el);
+      } else if (token.startsWith('*') && token.endsWith('*') && token.length >= 2) {
+        const el = document.createElement('em');
+        el.textContent = token.slice(1, -1);
+        parent.appendChild(el);
+      } else {
+        parent.appendChild(document.createTextNode(token));
+      }
+      last = m.index + token.length;
+    }
+    if (last < s.length) parent.appendChild(document.createTextNode(s.slice(last)));
+  }
+
+  function appendParagraph(blockLines) {
+    const p = document.createElement('p');
+    blockLines.forEach((ln, idx) => {
+      if (idx) p.appendChild(document.createElement('br'));
+      appendInline(p, ln);
+    });
+    frag.appendChild(p);
+  }
+
+  let i = 0;
+  while (i < lines.length) {
+    // Skip blank lines.
+    while (i < lines.length && !String(lines[i] || '').trim()) i++;
+    if (i >= lines.length) break;
+
+    // Unordered list block.
+    if (/^\s*[*\-+]\s+/.test(lines[i])) {
+      const ul = document.createElement('ul');
+      while (i < lines.length && /^\s*[*\-+]\s+/.test(lines[i])) {
+        const li = document.createElement('li');
+        const content = String(lines[i] || '').replace(/^\s*[*\-+]\s+/, '');
+        appendInline(li, content);
+        ul.appendChild(li);
+        i++;
+      }
+      frag.appendChild(ul);
+      continue;
+    }
+
+    // Paragraph block (until blank line or list).
+    const block = [];
+    while (i < lines.length && String(lines[i] || '').trim() && !/^\s*[*\-+]\s+/.test(lines[i])) {
+      block.push(String(lines[i] || ''));
+      i++;
+    }
+    if (block.length) appendParagraph(block);
+  }
+
+  return frag;
+}
+
+function setBubbleText(bubble, text, { markdown } = { markdown: false }) {
+  if (!bubble) return;
+  const textEl = bubble.querySelector('.text');
+  if (!textEl) return;
+  const raw = String(text || '');
+  // Preserve raw text/markdown so saveLiveChat() can persist formatting.
+  if (textEl.dataset) textEl.dataset.raw = raw;
+
+  if (!markdown) {
+    textEl.textContent = raw;
+    return;
+  }
+
+  textEl.replaceChildren(renderMarkdownToFragment(raw));
+}
+
 function addMessage(kind, roleLabel, text) {
   const { row, bubble } = createRow(kind);
   bubble.querySelector('.role').textContent = roleLabel;
-  bubble.querySelector('.text').textContent = text;
+  setBubbleText(bubble, text, { markdown: kind === 'bot' });
   messagesEl.appendChild(row);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return bubble;
@@ -193,7 +285,7 @@ function renderVideos(bubble, videos) {
 
   const head = document.createElement('div');
   head.className = 'videos-head';
-  head.textContent = 'Quest videos: ';
+  head.textContent = 'Videos: ';
   box.appendChild(head);
 
   const list = document.createElement('div');
@@ -304,6 +396,18 @@ function youtubeVideoId(url) {
   }
   const m = u.match(/[?&]v=([^&]+)/i);
   return m ? String(m[1] || '').trim() || null : null;
+}
+
+function isRedditUrl(url) {
+  const u = String(url || '').trim();
+  if (!u) return false;
+  try {
+    const parsed = new URL(u);
+    const host = (parsed.hostname || '').toLowerCase();
+    return host === 'reddit.com' || host.endsWith('.reddit.com');
+  } catch {
+    return false;
+  }
 }
 
 function openYouTubePreview(url, title) {
@@ -453,7 +557,7 @@ function attachFeedbackControls(bubble, historyId) {
 function addBotAnswer(answerText, sources, historyId, videos) {
   const { row, bubble } = createRow('bot');
   bubble.querySelector('.role').textContent = BOT_NAME;
-  bubble.querySelector('.text').textContent = answerText;
+  setBubbleText(bubble, answerText, { markdown: true });
   renderCitations(bubble, sources);
   renderVideos(bubble, videos);
   attachFeedbackControls(bubble, historyId);
@@ -469,7 +573,8 @@ function saveLiveChat() {
       const me = r.classList.contains('me');
       const bubble = r.querySelector('.msg');
       const role = bubble?.querySelector('.role')?.textContent || '';
-      const text = bubble?.querySelector('.text')?.textContent || '';
+      const textEl = bubble?.querySelector('.text');
+      const text = (textEl && textEl.dataset && textEl.dataset.raw != null) ? String(textEl.dataset.raw) : (textEl?.textContent || '');
       const cites = Array.from(bubble?.querySelectorAll('.citations a') || []).map((a) => ({
         title: a.textContent,
         url: a.getAttribute('href') || ''
@@ -711,7 +816,7 @@ function initVoiceChat() {
         if (!t) return;
         if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
         botText = t;
-        botBubble.querySelector('.text').textContent = botText;
+        setBubbleText(botBubble, botText, { markdown: true });
         return;
       }
 
@@ -720,7 +825,7 @@ function initVoiceChat() {
         if (!t) return;
         if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
         botText += t;
-        botBubble.querySelector('.text').textContent = botText;
+        setBubbleText(botBubble, botText, { markdown: true });
         return;
       }
 
@@ -1546,6 +1651,9 @@ if (messagesEl) {
 
     const url = a.dataset ? a.dataset.citationUrl : null;
     if (!url) return;
+
+    // Reddit posts often block preview fetching; just open them normally in a new tab.
+    if (isRedditUrl(url)) return;
 
     if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     e.preventDefault();
