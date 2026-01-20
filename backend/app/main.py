@@ -469,8 +469,10 @@ async def gemini_live_websocket(ws: WebSocket):
             )
         )
 
+    # Gemini Live currently allows at most one response modality in the setup request.
+    # We use AUDIO for voice chat, and enable transcripts via input/output_audio_transcription.
     connect_config = types.LiveConnectConfig(
-        response_modalities=[types.Modality.AUDIO, types.Modality.TEXT],
+        response_modalities=[types.Modality.AUDIO],
         system_instruction=system_instruction,
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
