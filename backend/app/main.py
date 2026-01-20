@@ -983,7 +983,7 @@ async def _chat_impl(
 
         return False
 
-    def _generate_with_retry(prompt: str, *, temperature: float = 0.2, max_output_tokens: int = 1024):
+    def _generate_with_retry(prompt: str, *, temperature: float = 0.2, max_output_tokens: int = 2048):
         client = GeminiVertexClient()
         res = client.generate(prompt, temperature=temperature, max_output_tokens=max_output_tokens)
         if _looks_truncated_answer(res.text):
@@ -992,7 +992,7 @@ async def _chat_impl(
                 prompt
                 + "\n\nIMPORTANT: Your previous answer was cut off mid-thought. Answer again fully, ending with a complete sentence."
             )
-            res = client.generate(repair_prompt, temperature=temperature, max_output_tokens=max(1536, max_output_tokens))
+            res = client.generate(repair_prompt, temperature=temperature, max_output_tokens=max(2560, max_output_tokens))
         return res
 
     def _has_source_citations(text: str) -> bool:

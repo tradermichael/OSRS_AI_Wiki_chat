@@ -1,4 +1,4 @@
-const messagesEl = document.getElementById('messages');
+﻿const messagesEl = document.getElementById('messages');
 const form = document.getElementById('chatForm');
 const input = document.getElementById('message');
 const historyListEl = document.getElementById('historyList');
@@ -1140,7 +1140,7 @@ function initVoiceChat() {
 
     if (!talking) {
       startTalking();
-      setVoiceChatState('Listening… (click again to send)');
+      setVoiceChatState('Listening... just speak naturally. Gemini will respond when you pause.');
     } else {
       stopTalking();
       if (sentAudioThisTurn) setVoiceChatState('Thinking…');
@@ -1923,3 +1923,4 @@ form.addEventListener('submit', async (e) => {
     loadHistory();
   }
 });
+

@@ -40,7 +40,7 @@ class GeminiVertexClient:
         model = GenerativeModel(self._model_name)
 
         t = 0.2 if temperature is None else float(temperature)
-        mot = 1024 if max_output_tokens is None else int(max_output_tokens)
+        mot = 2048 if max_output_tokens is None else int(max_output_tokens)
 
         response = model.generate_content(
             prompt,
