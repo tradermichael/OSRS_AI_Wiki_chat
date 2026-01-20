@@ -720,6 +720,20 @@ function initVoiceChat() {
   let playCtx = null;
   let playHead = 0;
   let playingSources = [];
+  let volumeGain = null;  // GainNode for volume control
+  let currentVolume = 0.8; // 0-1 range
+
+  // Volume slider
+  const voiceChatVolumeEl = document.getElementById('voiceChatVolume');
+  if (voiceChatVolumeEl) {
+    currentVolume = voiceChatVolumeEl.value / 100;
+    voiceChatVolumeEl.addEventListener('input', () => {
+      currentVolume = voiceChatVolumeEl.value / 100;
+      if (volumeGain) {
+        volumeGain.gain.value = currentVolume;
+      }
+    });
+  }
 
   // Orb state management
   function setOrbState(state) {
@@ -771,6 +785,10 @@ function initVoiceChat() {
     if (!playCtx) {
       playCtx = new (window.AudioContext || window.webkitAudioContext)();
       playHead = playCtx.currentTime;
+      // Create volume control GainNode
+      volumeGain = playCtx.createGain();
+      volumeGain.gain.value = currentVolume;
+      volumeGain.connect(playCtx.destination);
     }
     if (playCtx.state === 'suspended') {
       try { await playCtx.resume(); } catch { /* ignore */ }
@@ -900,7 +918,8 @@ function initVoiceChat() {
 
           const src = playCtx.createBufferSource();
           src.buffer = audioBuffer;
-          src.connect(playCtx.destination);
+          // Connect through volume GainNode for volume control
+          src.connect(volumeGain || playCtx.destination);
 
           const now = playCtx.currentTime;
           if (!playHead || playHead < now) playHead = now;
