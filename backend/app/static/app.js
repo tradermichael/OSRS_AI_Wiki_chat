@@ -945,7 +945,15 @@ function initVoiceChat() {
   async function setupMicIfNeeded() {
     if (micStream && micCtx && micProc && micSource) return;
     if (micStream && micCtx && micWorklet && micSource) return;
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      const errName = (err && err.name) ? err.name : '';
+      if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+        throw new Error('Microphone permission denied. Please allow microphone access in your browser settings.');
+      }
+      throw new Error('Could not access microphone: ' + (err.message || err));
+    }
     micCtx = new (window.AudioContext || window.webkitAudioContext)();
     micSource = micCtx.createMediaStreamSource(micStream);
 
@@ -1089,8 +1097,9 @@ function initVoiceChat() {
         setVoiceChatState('Still connecting… try again in a second.');
         return;
       }
-    } catch {
-      setVoiceChatState('Microphone permission denied.');
+    } catch (err) {
+      const msg = (err && err.message) ? err.message : 'Microphone permission denied.';
+      setVoiceChatState(msg);
       return;
     }
 
@@ -1262,17 +1271,28 @@ function initVoiceInput() {
   let listening = false;
   let baseText = '';
 
-  function start() {
+  async function start() {
     if (listening) return;
     if (input.disabled) return;
 
     baseText = (input.value || '').trim();
+    
+    // Request microphone permission first to avoid focus issues on mobile
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Stop the stream immediately - we just needed to trigger the permission prompt
+      stream.getTracks().forEach((t) => t.stop());
+    } catch {
+      setVoiceStatus('Microphone permission denied. Please allow microphone access.');
+      return;
+    }
+    
     try {
       recognition.start();
       listening = true;
       setVoiceBtnState(true);
       setVoiceStatus('Listening…');
-      input.focus();
+      // Don't focus input here - it triggers the keyboard on mobile
     } catch {
       // Some browsers throw if start() is called too quickly.
       listening = false;
@@ -1342,10 +1362,10 @@ function initVoiceInput() {
     setVoiceBtnState(false);
   });
 
-  voiceToggleBtn.addEventListener('click', () => {
+  voiceToggleBtn.addEventListener('click', async () => {
     if (input.disabled) return;
     if (listening) stop();
-    else start();
+    else await start();
   });
 
   document.addEventListener('visibilitychange', () => {
