@@ -799,8 +799,18 @@ function initVoiceChat() {
 
     ws.addEventListener('message', async (evt) => {
       let msg = null;
-      try { msg = JSON.parse(evt.data); } catch { return; }
+      try { msg = JSON.parse(evt.data); } catch (parseErr) {
+        console.warn('WebSocket message parse error:', parseErr, 'data type:', typeof evt.data);
+        return;
+      }
       if (!msg || !msg.type) return;
+      
+      // Debug logging for voice chat messages
+      if (msg.type !== 'audio') {
+        console.log('Voice chat message:', msg.type, msg);
+      } else {
+        console.log('Voice chat audio chunk received, length:', msg.data ? msg.data.length : 0);
+      }
 
       if (msg.type === 'ready') {
         liveReady = true;
@@ -867,27 +877,41 @@ function initVoiceChat() {
         const m = mime.match(/rate=(\d+)/);
         if (m) rate = parseInt(m[1], 10) || 24000;
 
-        await ensurePlayContext();
+        try {
+          await ensurePlayContext();
 
-        const pcm16 = new Int16Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 2));
-        const floats = new Float32Array(pcm16.length);
-        for (let i = 0; i < pcm16.length; i++) floats[i] = pcm16[i] / 0x8000;
+          // Check if AudioContext is running
+          if (playCtx.state === 'suspended') {
+            console.warn('AudioContext is suspended, cannot play audio');
+            setVoiceChatState('Audio blocked. Tap the page and try again.');
+            return;
+          }
 
-        const audioBuffer = playCtx.createBuffer(1, floats.length, rate);
-        audioBuffer.copyToChannel(floats, 0);
+          setVoiceChatState('Speaking…');
 
-        const src = playCtx.createBufferSource();
-        src.buffer = audioBuffer;
-        src.connect(playCtx.destination);
+          const pcm16 = new Int16Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 2));
+          const floats = new Float32Array(pcm16.length);
+          for (let i = 0; i < pcm16.length; i++) floats[i] = pcm16[i] / 0x8000;
 
-        const now = playCtx.currentTime;
-        if (!playHead || playHead < now) playHead = now;
-        src.start(playHead);
-        playHead += audioBuffer.duration;
-        playingSources.push(src);
-        src.addEventListener('ended', () => {
-          playingSources = playingSources.filter((x) => x !== src);
-        });
+          const audioBuffer = playCtx.createBuffer(1, floats.length, rate);
+          audioBuffer.copyToChannel(floats, 0);
+
+          const src = playCtx.createBufferSource();
+          src.buffer = audioBuffer;
+          src.connect(playCtx.destination);
+
+          const now = playCtx.currentTime;
+          if (!playHead || playHead < now) playHead = now;
+          src.start(playHead);
+          playHead += audioBuffer.duration;
+          playingSources.push(src);
+          src.addEventListener('ended', () => {
+            playingSources = playingSources.filter((x) => x !== src);
+          });
+        } catch (audioErr) {
+          console.error('Audio playback error:', audioErr);
+          setVoiceChatState('Audio playback failed.');
+        }
         return;
       }
 
@@ -1054,6 +1078,9 @@ function initVoiceChat() {
     talking = true;
     pushToTalkBtn.classList.add('is-talking');
     pushToTalkBtn.textContent = 'Stop & send';
+    
+    // Pre-create and resume audio playback context during user gesture (required for mobile)
+    ensurePlayContext();
   }
 
   function stopTalking() {
