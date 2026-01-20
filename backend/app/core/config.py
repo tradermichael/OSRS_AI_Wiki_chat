@@ -87,9 +87,13 @@ class Settings(BaseSettings):
     # Optional: Gemini Live API (realtime voice)
     # Uses server-side authentication (ADC). Client should connect via our backend.
     gemini_live_enabled: bool = True
-    gemini_live_location: str = "global"
+    gemini_live_location: str = "us-central1"
     gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
     gemini_live_voice_name: str = "Orus"
+
+    # Optional: authenticate Gemini Live via API key (Gemini API) instead of Vertex AI.
+    # If set, the live websocket will not require GOOGLE_CLOUD_PROJECT.
+    gemini_live_api_key: str | None = Field(default=None, validation_alias="GEMINI_LIVE_API_KEY")
 
     # Path to RAG sources configuration JSON (repo root defaults to rag_sources.json).
     rag_sources_path: str | None = None

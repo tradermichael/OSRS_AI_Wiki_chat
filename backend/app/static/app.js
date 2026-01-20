@@ -669,7 +669,6 @@ function initVoiceChat() {
       try {
         ws.send(JSON.stringify({
           type: 'start',
-          model: 'gemini-live-2.5-flash-native-audio',
         }));
       } catch { /* ignore */ }
     });

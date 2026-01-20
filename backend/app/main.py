@@ -4,6 +4,7 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -53,6 +54,8 @@ from .schemas import (
 )
 
 app = FastAPI(title="OSRS AI Wiki Chat")
+
+logger = logging.getLogger("osrs_ai_wiki_chat")
 
 
 async def _auto_retry_targeted_retrieval(
@@ -350,12 +353,20 @@ async def gemini_live_websocket(ws: WebSocket):
         return
 
     project = settings.google_cloud_project
-    location = (getattr(settings, "gemini_live_location", None) or "global").strip() or "global"
+    api_key = getattr(settings, "gemini_live_api_key", None)
+    auth_mode = "api_key" if api_key else "vertex"
+
+    default_live_location = (getattr(settings, "vertex_location", None) or "us-central1").strip() or "us-central1"
+    location = (getattr(settings, "gemini_live_location", None) or default_live_location).strip() or default_live_location
     model = (getattr(settings, "gemini_live_model", None) or "gemini-live-2.5-flash-native-audio").strip()
     default_voice = getattr(settings, "gemini_live_voice_name", None)
 
-    if not project:
-        await ws.send_json({"type": "error", "detail": "GOOGLE_CLOUD_PROJECT is required for Gemini Live."})
+    if auth_mode == "vertex" and not project:
+        await ws.send_json({"type": "error", "detail": "GOOGLE_CLOUD_PROJECT is required for Gemini Live (Vertex mode)."})
+        await ws.close(code=1011)
+        return
+    if auth_mode == "api_key" and not api_key:
+        await ws.send_json({"type": "error", "detail": "GEMINI_LIVE_API_KEY is required for Gemini Live (API key mode)."})
         await ws.close(code=1011)
         return
 
@@ -390,7 +401,8 @@ async def gemini_live_websocket(ws: WebSocket):
         return
 
     # If the server is configured with an unsupported model ID, fail fast with a clear error.
-    if model and model not in allowed_models:
+    # NOTE: In API-key mode, model IDs can differ; don't hard-block unless it's clearly malformed.
+    if auth_mode == "vertex" and model and model not in allowed_models:
         await ws.send_json(
             {
                 "type": "error",
@@ -419,7 +431,7 @@ async def gemini_live_websocket(ws: WebSocket):
     # Allow the client to request a specific live model (still validated on the server).
     requested_model = _normalize_model_name(str(start_msg.get("model") or start_msg.get("modelId") or ""))
     if requested_model:
-        if requested_model not in allowed_models:
+        if auth_mode == "vertex" and requested_model not in allowed_models:
             await ws.send_json(
                 {
                     "type": "error",
@@ -458,12 +470,20 @@ async def gemini_live_websocket(ws: WebSocket):
     )
 
     # Create client and connect.
-    client = genai.Client(
-        vertexai=True,
-        project=project,
-        location=location,
-        http_options=types.HttpOptions(api_version="v1beta1"),
-    )
+    # Vertex mode uses ADC + project/location.
+    # API-key mode uses the Gemini API key and ignores project/location.
+    if auth_mode == "vertex":
+        client = genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+            http_options=types.HttpOptions(api_version="v1beta1"),
+        )
+    else:
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(api_version="v1beta1"),
+        )
 
     async def _send_server_content(server_content: object) -> None:
         # server_content is a types.LiveServerContent.
@@ -527,7 +547,8 @@ async def gemini_live_websocket(ws: WebSocket):
             return (
                 "Gemini Live rejected the request (policy/permissions). "
                 "This usually means the live model isn't available to this project/region, "
-                "or the model id is misconfigured."
+                "or the model id is misconfigured. "
+                "Try setting GEMINI_LIVE_LOCATION=us-central1 and/or GEMINI_LIVE_MODEL=gemini-live-2.5-flash-exp-native-audio."
             )
         if "permission" in low or "unauth" in low or "forbidden" in low:
             return (
@@ -536,9 +557,106 @@ async def gemini_live_websocket(ws: WebSocket):
             )
         return raw or "Gemini Live connection failed."
 
+    def _should_try_fallback(exc: Exception) -> bool:
+        msg = (str(exc) or "").lower()
+        return any(
+            s in msg
+            for s in (
+                "publisher model",
+                "policy violation",
+                "not found",
+                "resource not found",
+                "invalid argument",
+            )
+        )
+
+    def _candidate_attempts(*, primary_model: str, primary_location: str) -> list[tuple[str, str, str]]:
+        """Returns (model, location, label) attempts in priority order."""
+        attempts: list[tuple[str, str, str]] = [(primary_model, primary_location, "primary")]
+
+        if auth_mode != "vertex":
+            # In API-key mode, location is not used by the SDK; only try model fallbacks.
+            if primary_model == "gemini-live-2.5-flash-native-audio":
+                attempts.append(("gemini-live-2.5-flash-exp-native-audio", primary_location, "fallback_model"))
+            return attempts
+
+        # If someone configured global (common assumption), also try the Vertex region.
+        # Vertex-backed Gemini endpoints are typically regional.
+        if primary_location.lower() == "global":
+            attempts.append((primary_model, default_live_location, "fallback_location"))
+
+        # If the stable model is blocked for this project/region, try the exp variant.
+        if primary_model == "gemini-live-2.5-flash-native-audio":
+            attempts.append(("gemini-live-2.5-flash-exp-native-audio", primary_location, "fallback_model"))
+            if primary_location.lower() == "global":
+                attempts.append(("gemini-live-2.5-flash-exp-native-audio", default_live_location, "fallback_both"))
+
+        # De-dupe while preserving order.
+        seen: set[tuple[str, str]] = set()
+        out: list[tuple[str, str, str]] = []
+        for m, loc, label in attempts:
+            key = (m, loc)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((m, loc, label))
+        return out
+
+    from contextlib import AsyncExitStack
+
     try:
-        async with client.aio.live.connect(model=model, config=connect_config) as session:
-            await ws.send_json({"type": "ready", "model": model, "location": location})
+        async with AsyncExitStack() as stack:
+            session = None
+            used_model = model
+            used_location = location
+            used_label = "primary"
+
+            last_exc: Exception | None = None
+            for cand_model, cand_location, cand_label in _candidate_attempts(
+                primary_model=model, primary_location=location
+            ):
+                if auth_mode == "vertex":
+                    cand_client = genai.Client(
+                        vertexai=True,
+                        project=project,
+                        location=cand_location,
+                        http_options=types.HttpOptions(api_version="v1beta1"),
+                    )
+                else:
+                    cand_client = genai.Client(
+                        api_key=api_key,
+                        http_options=types.HttpOptions(api_version="v1beta1"),
+                    )
+                try:
+                    session = await stack.enter_async_context(
+                        cand_client.aio.live.connect(model=cand_model, config=connect_config)
+                    )
+                    used_model, used_location, used_label = cand_model, cand_location, cand_label
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.exception(
+                        "Gemini Live connect failed (attempt=%s auth=%s model=%s location=%s)",
+                        cand_label,
+                        auth_mode,
+                        cand_model,
+                        cand_location,
+                    )
+                    if not _should_try_fallback(exc):
+                        break
+
+            if session is None:
+                raise last_exc or RuntimeError("Gemini Live connect failed")
+
+            await ws.send_json(
+                {
+                    "type": "ready",
+                    "model": used_model,
+                    "location": used_location,
+                    "attempt": used_label,
+                    "auth": auth_mode,
+                }
+            )
 
             pump_task = asyncio.create_task(_pump_from_gemini(session))
             try:
@@ -584,6 +702,7 @@ async def gemini_live_websocket(ws: WebSocket):
         return
     except Exception as exc:
         # Never let Live API errors bubble out; browsers will show a confusing 1008 close.
+        logger.exception("Gemini Live session failed (auth=%s model=%s location=%s)", auth_mode, model, location)
         with contextlib.suppress(Exception):
             await ws.send_json(
                 {
@@ -592,6 +711,7 @@ async def gemini_live_websocket(ws: WebSocket):
                     "raw": str(exc)[:500],
                     "model": model,
                     "location": location,
+                    "auth": auth_mode,
                 }
             )
         with contextlib.suppress(Exception):

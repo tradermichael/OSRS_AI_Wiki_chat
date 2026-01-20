@@ -10,6 +10,18 @@ GCP_RUNTIME_SERVICE_ACCOUNT_EMAIL=osrs-ai-wiki-chat-runtime@YOUR_PROJECT.iam.gse
 
 GEMINI_MODEL=gemini-2.5-flash
 
+# Optional: Gemini Live (realtime voice). If you see "Gemini Live rejected the request",
+# it's usually a region/model availability issue.
+GEMINI_LIVE_ENABLED=true
+GEMINI_LIVE_LOCATION=us-central1
+GEMINI_LIVE_MODEL=gemini-live-2.5-flash-native-audio
+# If the stable model is blocked for your project/region, try:
+# GEMINI_LIVE_MODEL=gemini-live-2.5-flash-exp-native-audio
+
+# Alternative auth (Gemini API key) instead of Vertex/ADC. If this is set, the backend
+# will use API-key auth for Gemini Live and won't require GOOGLE_CLOUD_PROJECT.
+# GEMINI_LIVE_API_KEY=
+
 # Optional: LLM "judge" pass. If enabled and confidence < threshold, chat triggers live retrieval + retries once.
 # ANSWER_JUDGE_ENABLED=true
 # ANSWER_JUDGE_THRESHOLD=0.55
