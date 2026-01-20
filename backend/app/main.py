@@ -557,21 +557,38 @@ async def gemini_live_websocket(ws: WebSocket):
 
     async def _pump_from_gemini(session) -> None:
         logger.info("Starting to pump messages from Gemini Live")
-        async for message in session.receive():
-            logger.debug("Received message from Gemini Live: %s", type(message).__name__)
-            sc = getattr(message, "server_content", None)
-            if sc is not None:
-                logger.info("Gemini Live server_content received: interrupted=%s, turn_complete=%s, has_model_turn=%s",
-                           getattr(sc, "interrupted", False),
-                           getattr(sc, "turn_complete", False),
-                           getattr(sc, "model_turn", None) is not None)
-                await _send_server_content(sc)
+        message_count = 0
+        try:
+            async for message in session.receive():
+                message_count += 1
+                logger.debug("Received message #%d from Gemini Live: %s", message_count, type(message).__name__)
+                sc = getattr(message, "server_content", None)
+                if sc is not None:
+                    logger.info("Gemini Live server_content received: interrupted=%s, turn_complete=%s, has_model_turn=%s",
+                               getattr(sc, "interrupted", False),
+                               getattr(sc, "turn_complete", False),
+                               getattr(sc, "model_turn", None) is not None)
+                    await _send_server_content(sc)
 
-            # Some SDK versions expose a convenience text field.
-            msg_text = getattr(message, "text", None)
-            if msg_text:
-                logger.info("Gemini Live text response: %s", msg_text[:100] if len(msg_text) > 100 else msg_text)
-                await ws.send_json({"type": "model_text", "text": msg_text})
+                # Some SDK versions expose a convenience text field.
+                msg_text = getattr(message, "text", None)
+                if msg_text:
+                    logger.info("Gemini Live text response: %s", msg_text[:100] if len(msg_text) > 100 else msg_text)
+                    await ws.send_json({"type": "model_text", "text": msg_text})
+            
+            # If we reach here, the Gemini session ended normally (timeout/disconnect)
+            logger.warning("Gemini Live session receive() iterator ended after %d messages - session closed by server", message_count)
+            with contextlib.suppress(Exception):
+                await ws.send_json({"type": "session_ended", "detail": "Gemini Live session ended (inactivity timeout)"})
+        except asyncio.CancelledError:
+            logger.info("Gemini Live pump task cancelled after %d messages", message_count)
+            raise
+        except Exception as exc:
+            logger.exception("Gemini Live pump task error after %d messages: %s", message_count, exc)
+            # Send error to client but don't re-raise - let the main loop handle cleanup
+            with contextlib.suppress(Exception):
+                await ws.send_json({"type": "error", "detail": f"Gemini Live stream error: {exc}"})
+            raise
 
     def _friendly_live_error_detail(exc: Exception) -> str:
         raw = str(exc) if exc is not None else ""
@@ -694,7 +711,17 @@ async def gemini_live_websocket(ws: WebSocket):
             pump_task = asyncio.create_task(_pump_from_gemini(session))
             try:
                 while True:
-                    incoming = await ws.receive()
+                    # Check if pump task ended (Gemini session closed)
+                    if pump_task.done():
+                        logger.warning("Gemini Live pump task ended - session closed by server")
+                        # The pump task already sent session_ended message
+                        break
+
+                    # Use wait_for with a timeout so we can check pump_task periodically
+                    try:
+                        incoming = await asyncio.wait_for(ws.receive(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue  # Loop back to check pump_task
 
                     if incoming.get("type") == "websocket.disconnect":
                         break

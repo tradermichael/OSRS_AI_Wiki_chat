@@ -924,6 +924,16 @@ function initVoiceChat() {
           setVoiceChatState('Listening... speak anytime');
         }
       }
+
+      if (msg.type === 'session_ended') {
+        // Gemini Live session timed out - need to restart conversation
+        console.warn('Gemini Live session ended:', msg.detail);
+        inConversation = false;
+        setOrbState('');
+        setVoiceChatState('Session timed out. Click "Start Conversation" to continue.');
+        pushToTalkBtn.textContent = 'Start Conversation';
+        // Don't close the WebSocket - let the user restart by clicking the button again
+      }
     });
 
     ws.addEventListener('close', (evt) => {
@@ -934,7 +944,7 @@ function initVoiceChat() {
       setOrbState('');
       pushToTalkBtn.disabled = true;
       pushToTalkBtn.classList.remove('is-talking');
-      pushToTalkBtn.textContent = 'Talk';
+      pushToTalkBtn.textContent = 'Start Conversation';
 
       const code = (evt && typeof evt.code === 'number') ? evt.code : null;
       const reason = (evt && evt.reason) ? String(evt.reason).trim() : '';
@@ -952,6 +962,12 @@ function initVoiceChat() {
           status = 'Voice chat blocked by Gemini Live (model/permissions). Check Cloud Run logs + GEMINI_LIVE_MODEL.';
         }
       }
+      
+      // 1011 = server error - session likely timed out
+      if (!lastWsError && code === 1011) {
+        status = 'Voice session ended. Click "Start Conversation" to start a new session.';
+      }
+      
       setVoiceChatState(status);
 
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = true;
