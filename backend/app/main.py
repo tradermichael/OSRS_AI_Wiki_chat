@@ -534,20 +534,29 @@ async def gemini_live_websocket(ws: WebSocket):
                     mime = str(inline.mime_type)
                     if mime.startswith("audio/"):
                         b64 = base64.b64encode(inline.data).decode("ascii")
+                        logger.info("Sending audio to client: %s, %d bytes encoded", mime, len(b64))
                         await ws.send_json({"type": "audio", "mime": mime, "data": b64})
 
         if bool(getattr(server_content, "turn_complete", False)):
+            logger.info("Gemini Live turn_complete received")
             await ws.send_json({"type": "turn_complete"})
 
     async def _pump_from_gemini(session) -> None:
+        logger.info("Starting to pump messages from Gemini Live")
         async for message in session.receive():
+            logger.debug("Received message from Gemini Live: %s", type(message).__name__)
             sc = getattr(message, "server_content", None)
             if sc is not None:
+                logger.info("Gemini Live server_content received: interrupted=%s, turn_complete=%s, has_model_turn=%s",
+                           getattr(sc, "interrupted", False),
+                           getattr(sc, "turn_complete", False),
+                           getattr(sc, "model_turn", None) is not None)
                 await _send_server_content(sc)
 
             # Some SDK versions expose a convenience text field.
             msg_text = getattr(message, "text", None)
             if msg_text:
+                logger.info("Gemini Live text response: %s", msg_text[:100] if len(msg_text) > 100 else msg_text)
                 await ws.send_json({"type": "model_text", "text": msg_text})
 
     def _friendly_live_error_detail(exc: Exception) -> str:
@@ -679,6 +688,7 @@ async def gemini_live_websocket(ws: WebSocket):
                     if incoming.get("bytes") is not None:
                         audio_bytes = incoming["bytes"]
                         if audio_bytes:
+                            logger.info("Received audio from client: %d bytes", len(audio_bytes))
                             await session.send_realtime_input(
                                 audio={"mime_type": "audio/pcm;rate=16000", "data": audio_bytes}
                             )
@@ -694,6 +704,7 @@ async def gemini_live_websocket(ws: WebSocket):
 
                     evt_type = (evt.get("type") or "").strip()
                     if evt_type == "audio_stream_end":
+                        logger.info("Received audio_stream_end from client, sending to Gemini Live")
                         await session.send_realtime_input(audio_stream_end=True)
                     elif evt_type == "text":
                         t = (evt.get("text") or "").strip()
