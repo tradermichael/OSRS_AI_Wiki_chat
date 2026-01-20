@@ -1251,7 +1251,7 @@ function enterHistoryView(item) {
   const ts = Number.isNaN(dt.getTime()) ? item.created_at : dt.toLocaleString();
   if (viewBannerTextEl) viewBannerTextEl.textContent = `Viewing #${item.id} • ${ts}`;
   if (viewBannerEl) viewBannerEl.hidden = false;
-  if (resumeChatBtn) resumeChatBtn.hidden = false;
+  setPrimaryActionBtnState();
   setComposerEnabled(false);
 
   addMessage('me', 'You', item.user_message);
@@ -1261,7 +1261,7 @@ function enterHistoryView(item) {
 function exitHistoryView() {
   viewingHistoryId = null;
   if (viewBannerEl) viewBannerEl.hidden = true;
-  if (resumeChatBtn) resumeChatBtn.hidden = true;
+  setPrimaryActionBtnState();
   setComposerEnabled(true);
   input.focus();
 
@@ -1272,6 +1272,38 @@ function exitHistoryView() {
     messagesEl.innerHTML = '';
     addMessage('bot', BOT_NAME, 'Ask me anything about OSRS.');
   }
+}
+
+function setPrimaryActionBtnState() {
+  if (!resumeChatBtn) return;
+  // This button doubles as:
+  // - "Back to chat" when viewing a history entry
+  // - "New chat" during the live session
+  resumeChatBtn.hidden = false;
+  resumeChatBtn.textContent = viewingHistoryId ? 'Back to chat' : 'New chat';
+}
+
+function startNewChat() {
+  // If we were viewing history, return to live first.
+  if (viewingHistoryId) {
+    exitHistoryView();
+  }
+
+  // Clear local live transcript and force a new session id so history entries
+  // don't get appended to the previous conversation.
+  try {
+    localStorage.removeItem(LIVE_CHAT_KEY);
+    localStorage.removeItem(SESSION_ID_KEY);
+  } catch {
+    // ignore
+  }
+
+  liveChatSnapshot = null;
+  messagesEl.innerHTML = '';
+  addMessage('bot', BOT_NAME, 'Ask me anything about OSRS.');
+  setPrimaryActionBtnState();
+  setComposerEnabled(true);
+  input.focus();
 }
 
 function renderHistory(items) {
@@ -1484,6 +1516,8 @@ if (messagesEl && loadLiveChat()) {
   // already restored
 }
 
+setPrimaryActionBtnState();
+
 if (refreshHistoryBtn) {
   refreshHistoryBtn.addEventListener('click', () => {
     loadHistory();
@@ -1492,7 +1526,8 @@ if (refreshHistoryBtn) {
 
 if (resumeChatBtn) {
   resumeChatBtn.addEventListener('click', () => {
-    exitHistoryView();
+    if (viewingHistoryId) exitHistoryView();
+    else startNewChat();
   });
 }
 

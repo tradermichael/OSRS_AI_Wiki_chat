@@ -104,6 +104,16 @@ def build_osrs_opinion_video_query(user_message: str) -> str:
     return f"osrs \"old school runescape\" {q} opinions"
 
 
+def build_osrs_combat_guide_query(user_message: str) -> str:
+    """Build a YouTube query for combat/boss/monster strategy questions."""
+
+    q = _normalize_query(user_message)
+    if not q:
+        return ""
+    # Bias strongly toward OSRS and guides/strategies.
+    return f"osrs \"old school runescape\" {q} guide strategy"
+
+
 _OSRS_POSITIVE_MARKERS = (
     "osrs",
     "old school runescape",
@@ -250,6 +260,79 @@ async def maybe_get_opinion_videos(*, user_message: str) -> list[YouTubeVideo]:
         max_results=settings.youtube_max_results,
     )
     return [v for v in videos if _is_osrs_relevant(v)]
+
+
+def looks_like_combat_question(message: str) -> bool:
+    msg = (message or "").lower()
+    if not msg:
+        return False
+
+    needles = (
+        "how to beat",
+        "how do i beat",
+        "how to kill",
+        "how do i kill",
+        "how to defeat",
+        "how do i defeat",
+        "boss",
+        "boss fight",
+        "strateg",
+        "mechanic",
+        "prayer",
+        "phase",
+    )
+    return any(n in msg for n in needles)
+
+
+async def combat_youtube_insight_chunks(*, user_message: str, max_videos: int = 3) -> list[RetrievedChunk]:
+    """Turn top OSRS combat/guide YouTube videos into short citable chunks.
+
+    Best-effort and intentionally lightweight: prefers descriptions unless a transcript
+    is available.
+    """
+
+    api_key = settings.youtube_api_key
+    if not api_key:
+        return []
+
+    if not looks_like_combat_question(user_message):
+        return []
+
+    q = build_osrs_combat_guide_query(user_message)
+    if not q:
+        return []
+
+    videos = await youtube_search_videos(api_key=api_key, query=q, max_results=max_videos)
+    videos = [v for v in videos if _is_osrs_relevant(v)][: max(1, int(max_videos))]
+    if not videos:
+        return []
+
+    out: list[RetrievedChunk] = []
+    for v in videos:
+        # Prefer a short transcript excerpt when available, otherwise description.
+        transcript = None
+        try:
+            transcript = await youtube_fetch_transcript(v.video_id)
+        except Exception:
+            transcript = None
+
+        body = (transcript or v.description or "").strip()
+        if not body:
+            body = "YouTube guide video (no transcript/description available)."
+
+        channel = (v.channel or "").strip()
+        head = f"YouTube ({channel}): {v.title}" if channel else f"YouTube: {v.title}"
+        text = f"{head}\n\n{body}"
+
+        out.append(
+            RetrievedChunk(
+                text=text[:1200],
+                url=v.url,
+                title=v.title[:120],
+            )
+        )
+
+    return out
 
 
 async def opinion_youtube_insight_chunks(*, user_message: str, max_videos: int = 3) -> list[RetrievedChunk]:

@@ -32,7 +32,15 @@ from .rag.store import make_chunk_id
 from .rag.store import RetrievedChunk
 from .rag.wiki_preview import fetch_wiki_preview
 from .rag.google_cse import url_to_title
-from .rag.youtube import quest_youtube_videos_with_summaries, quest_youtube_insight_chunks, opinion_youtube_insight_chunks
+from .rag.youtube import (
+    quest_youtube_videos_with_summaries,
+    quest_youtube_insight_chunks,
+    opinion_youtube_insight_chunks,
+    combat_youtube_insight_chunks,
+)
+from .rag.reddit import reddit_search_chunks
+
+from typing import Any
 from .schemas import (
     CapturePayPalOrderResponse,
     ChatRequest,
@@ -779,6 +787,147 @@ async def _chat_impl(
     async def _status(msg: str) -> None:
         if status_cb:
             await status_cb(msg)
+
+    async def _maybe_retry_with_broader_sources(
+        *,
+        prompt_user_message: str,
+        conversation_context: str,
+        raw_user_message: str,
+        user_message: str,
+        pronoun_followup: bool,
+        topic_hint: str,
+        prefixes: list[str],
+        allow_external_sources: bool,
+        prompt_chunks: list[RetrievedChunk],
+        res: Any,
+        opinion_question: bool,
+        difficulty_question: bool,
+        strategy_followup: bool,
+        quest_help: bool,
+    ) -> tuple[Any, list[RetrievedChunk], str | None, list[WebSearchResult]]:
+        """Optional second pass: if the judge is unconvinced, do broader retrieval and regenerate once."""
+
+        nonlocal web_query, web_results
+
+        if not settings.answer_judge_enabled:
+            return res, prompt_chunks, web_query, web_results
+
+        try:
+            judge_sources = [
+                {"title": getattr(c, "title", None), "url": getattr(c, "url", "")}
+                for c in (prompt_chunks or [])
+                if getattr(c, "url", None)
+            ][:6]
+            j = judge_answer_confidence(
+                user_message=prompt_user_message,
+                answer=res.text or "",
+                sources=judge_sources,
+            )
+            actions.append(f"Judge confidence={j.confidence:.2f}; needs_web_search={bool(j.needs_web_search)}.")
+
+            if j.confidence >= float(settings.answer_judge_threshold):
+                return res, prompt_chunks, web_query, web_results
+
+            await _status("My librarian looks doubtful; fetching better sources...")
+            actions.append("Judge flagged low confidence; forced live retrieval/web search.")
+
+            retry_seed = (user_message if not pronoun_followup else (topic_hint or user_message)).strip()
+            retry_qs = derive_search_queries(retry_seed) or [retry_seed]
+            retry_primary = retry_qs[0]
+
+            # Wiki first.
+            live_chunks = await live_query_chunks(retry_primary, allowed_url_prefixes=prefixes)
+
+            # Community (Reddit) + YouTube (guide vids), best-effort.
+            reddit_chunks: list[RetrievedChunk] = []
+            try:
+                reddit_chunks = await reddit_search_chunks(query=retry_primary, max_results=4)
+                if reddit_chunks:
+                    actions.append("Consulted Reddit community threads (snippets only).")
+            except Exception:
+                reddit_chunks = []
+
+            yt_chunks: list[RetrievedChunk] = []
+            if settings.youtube_api_key:
+                try:
+                    yt_chunks = await combat_youtube_insight_chunks(user_message=user_message, max_videos=2)
+                    if yt_chunks:
+                        actions.append("Consulted YouTube guide videos for extra tips.")
+                except Exception:
+                    yt_chunks = []
+
+            # If wiki still empty, try CSE web search.
+            if not live_chunks:
+                try:
+                    web_chunks, web_hits = await live_search_web_and_fetch_chunks(
+                        retry_primary,
+                        allowed_url_prefixes=prefixes,
+                        max_results=5,
+                        max_chunks_total=8,
+                    )
+                except Exception:
+                    web_chunks, web_hits = ([], [])
+
+                if (not web_chunks) and web_hits and settings.web_scrape_enabled:
+                    try:
+                        scraped_chunks, _ = await live_search_web_and_scrape_chunks(
+                            retry_primary,
+                            max_results=5,
+                            max_pages=int(settings.web_scrape_max_pages),
+                            max_chunks_total=int(settings.web_scrape_max_chunks_total),
+                            skip_url_prefixes=prefixes,
+                        )
+                    except Exception:
+                        scraped_chunks = []
+                    if scraped_chunks:
+                        actions.append("Scraped non-wiki pages returned by CSE (untrusted web).")
+                        web_chunks = scraped_chunks
+
+                web_query = retry_primary
+                if web_hits:
+                    web_results = [
+                        WebSearchResult(
+                            title=str((r.title or "")[:120]),
+                            url=str(r.url),
+                            snippet=(str(r.snippet)[:240] if r.snippet else None),
+                        )
+                        for r in (web_hits or [])
+                        if getattr(r, "url", None)
+                    ][:5]
+
+                live_chunks = web_chunks
+
+            merged_chunks = (live_chunks or []) + (reddit_chunks or []) + (yt_chunks or [])
+
+            # If we add reddit/youtube, allow external citations for the retry prompt.
+            retry_allow_external = bool(allow_external_sources or reddit_chunks or yt_chunks)
+            retry_prompt_chunks = _build_prompt_chunks(
+                chunks=merged_chunks,
+                retrieval_seed=retry_seed,
+                user_question=(raw_user_message or user_message or ""),
+                topic_hint=topic_hint or "",
+                prefixes=prefixes,
+                allow_external_sources=retry_allow_external,
+            )
+
+            if retry_prompt_chunks:
+                retry_prompt = build_rag_prompt(
+                    user_message=prompt_user_message,
+                    conversation_context=conversation_context,
+                    chunks=retry_prompt_chunks,
+                    allowed_url_prefixes=prefixes,
+                    allow_external_sources=bool(retry_allow_external),
+                    allow_best_effort=bool(opinion_question or difficulty_question or strategy_followup or quest_help),
+                )
+                res = _generate_with_retry(retry_prompt)
+                prompt_chunks = retry_prompt_chunks
+                actions.append("Regenerated answer after judge-triggered retrieval.")
+
+        except Exception:
+            # Best-effort; never break chat.
+            return res, prompt_chunks, web_query, web_results
+
+        return res, prompt_chunks, web_query, web_results
 
     def _looks_truncated_answer(text: str) -> bool:
         t = (text or "").strip()
@@ -2386,99 +2535,22 @@ async def _chat_impl(
 
     actions.append("Composed the reply with citations.")
 
-    # Optional: use a second-pass judge to decide if the answer is well-supported by the retrieved sources.
-    # If the judge is unconvinced, we trigger a live web/wiki fetch and regenerate once.
-    if settings.answer_judge_enabled:
-        try:
-            judge_sources = [
-                {"title": getattr(c, "title", None), "url": getattr(c, "url", "")}
-                for c in (prompt_chunks or [])
-                if getattr(c, "url", None)
-            ][:6]
-            j = judge_answer_confidence(
-                user_message=prompt_user_message,
-                answer=res.text or "",
-                sources=judge_sources,
-            )
-            actions.append(
-                f"Judge confidence={j.confidence:.2f}; needs_web_search={bool(j.needs_web_search)}."
-            )
-
-            if j.needs_web_search and j.confidence < float(settings.answer_judge_threshold):
-                await _status("My librarian looks doubtful; fetching better sources...")
-                actions.append("Judge flagged low confidence; forced live retrieval/web search.")
-
-                retry_seed = (user_message if not pronoun_followup else (topic_hint or user_message)).strip()
-                retry_qs = derive_search_queries(retry_seed) or [retry_seed]
-                retry_primary = retry_qs[0]
-
-                # First: try live MediaWiki retrieval.
-                live_chunks = await live_query_chunks(retry_primary, allowed_url_prefixes=prefixes)
-
-                # If still empty, fall back to Google CSE web search.
-                if not live_chunks:
-                    try:
-                        web_chunks, web_hits = await live_search_web_and_fetch_chunks(
-                            retry_primary,
-                            allowed_url_prefixes=prefixes,
-                            max_results=5,
-                            max_chunks_total=8,
-                        )
-                    except Exception:
-                        web_chunks, web_hits = ([], [])
-
-                    if (not web_chunks) and web_hits and settings.web_scrape_enabled:
-                        try:
-                            scraped_chunks, _ = await live_search_web_and_scrape_chunks(
-                                retry_primary,
-                                max_results=5,
-                                max_pages=int(settings.web_scrape_max_pages),
-                                max_chunks_total=int(settings.web_scrape_max_chunks_total),
-                                skip_url_prefixes=prefixes,
-                            )
-                        except Exception:
-                            scraped_chunks = []
-                        if scraped_chunks:
-                            actions.append("Scraped non-wiki pages returned by CSE (untrusted web).")
-                            web_chunks = scraped_chunks
-
-                    web_query = retry_primary
-                    if web_hits:
-                        web_results = [
-                            WebSearchResult(
-                                title=str((r.title or "")[:120]),
-                                url=str(r.url),
-                                snippet=(str(r.snippet)[:240] if r.snippet else None),
-                            )
-                            for r in (web_hits or [])
-                            if getattr(r, "url", None)
-                        ][:5]
-
-                    live_chunks = web_chunks
-
-                retry_prompt_chunks = _build_prompt_chunks(
-                    chunks=live_chunks,
-                    retrieval_seed=retry_seed,
-                    user_question=(raw_user_message or user_message or ""),
-                    topic_hint=topic_hint,
-                    prefixes=prefixes,
-                    allow_external_sources=allow_external_sources,
-                )
-                if retry_prompt_chunks:
-                    retry_prompt = build_rag_prompt(
-                        user_message=prompt_user_message,
-                        conversation_context=conversation_context,
-                        chunks=retry_prompt_chunks,
-                        allowed_url_prefixes=prefixes,
-                        allow_external_sources=bool(allow_external_sources),
-                        allow_best_effort=bool(opinion_question or difficulty_question),
-                    )
-                    res = _generate_with_retry(retry_prompt)
-                    prompt_chunks = retry_prompt_chunks
-                    actions.append("Regenerated answer after judge-triggered retrieval.")
-        except Exception:
-            # Judge is best-effort; don't break chat.
-            pass
+    res, prompt_chunks, web_query, web_results = await _maybe_retry_with_broader_sources(
+        prompt_user_message=prompt_user_message,
+        conversation_context=conversation_context,
+        raw_user_message=raw_user_message,
+        user_message=user_message,
+        pronoun_followup=pronoun_followup,
+        topic_hint=topic_hint,
+        prefixes=prefixes,
+        allow_external_sources=bool(allow_external_sources),
+        prompt_chunks=prompt_chunks,
+        res=res,
+        opinion_question=bool(opinion_question),
+        difficulty_question=bool(difficulty_question),
+        strategy_followup=bool(strategy_followup),
+        quest_help=bool(quest_help),
+    )
 
     # If the model effectively said "I don't know" (including the roleplay variants), do one retry
     # with a fresh, focused wiki lookup to avoid returning random sources.
