@@ -1015,6 +1015,7 @@ function initVoiceChat() {
 
           const pcm = downsampleFloat32ToInt16(f32, micCtx.sampleRate, 16000);
           if (!pcm || !pcm.length) return;
+          if (!sentAudioThisTurn) console.log('First audio chunk captured via AudioWorklet');
           sentAudioThisTurn = true;
           try { ws.send(pcm.buffer); } catch { /* ignore */ }
         };
@@ -1041,6 +1042,7 @@ function initVoiceChat() {
       const ch0 = e.inputBuffer.getChannelData(0);
       const pcm = downsampleFloat32ToInt16(ch0, micCtx.sampleRate, 16000);
       if (!pcm || !pcm.length) return;
+      if (!sentAudioThisTurn) console.log('First audio chunk captured via ScriptProcessor');
       sentAudioThisTurn = true;
       try {
         ws.send(pcm.buffer);
@@ -1088,11 +1090,17 @@ function initVoiceChat() {
     talking = false;
     pushToTalkBtn.classList.remove('is-talking');
     pushToTalkBtn.textContent = 'Talk';
+    console.log('stopTalking called, sentAudioThisTurn:', sentAudioThisTurn);
     try {
       if (sentAudioThisTurn && ws && ws.readyState === WebSocket.OPEN) {
+        console.log('Sending audio_stream_end to server');
         ws.send(JSON.stringify({ type: 'audio_stream_end' }));
+      } else {
+        console.log('NOT sending audio_stream_end - sentAudioThisTurn:', sentAudioThisTurn, 'ws open:', ws && ws.readyState === WebSocket.OPEN);
       }
-    } catch { /* ignore */ }
+    } catch (err) {
+      console.error('Error sending audio_stream_end:', err);
+    }
   }
 
   voiceChatToggleBtn.addEventListener('click', async () => {
