@@ -699,14 +699,14 @@ function initVoiceChat() {
   if (!voiceChatToggleBtn || !voiceChatPanelEl || !pushToTalkBtn) return;
 
   const WS_URL = ((location.protocol === 'https:') ? 'wss://' : 'ws://') + location.host + '/api/live/ws';
+  const voiceChatOrbEl = document.getElementById('voiceChatOrb');
 
   let ws = null;
   let connecting = false;
-  let talking = false;
+  let inConversation = false;  // True when mic is continuously streaming
   let liveReady = false;
   let lastWsError = '';
   let inputTx = '';
-  let sentAudioThisTurn = false;
   let readyWaitResolve = null;
   let readyWaitTimer = null;
 
@@ -721,8 +721,13 @@ function initVoiceChat() {
   let playHead = 0;
   let playingSources = [];
 
-  let botBubble = null;
-  let botText = '';
+  // Orb state management
+  function setOrbState(state) {
+    if (!voiceChatOrbEl) return;
+    voiceChatOrbEl.classList.remove('listening', 'speaking');
+    if (state === 'listening') voiceChatOrbEl.classList.add('listening');
+    else if (state === 'speaking') voiceChatOrbEl.classList.add('speaking');
+  }
 
   function waitForReady(timeoutMs = 8000) {
     if (liveReady) return Promise.resolve(true);
@@ -837,34 +842,30 @@ function initVoiceChat() {
 
       if (msg.type === 'interrupted') {
         stopPlayback();
-        resetBotTurn();
+        setOrbState('listening');
         return;
       }
 
       if (msg.type === 'input_transcript') {
-        if (msg.text) inputTx = String(msg.text);
-        if (msg.finished && inputTx) {
-          addMessage('me', 'You (voice)', inputTx);
-          inputTx = '';
+        // User is speaking - just log it, don't add to chat
+        if (msg.text) {
+          inputTx = String(msg.text);
+          console.log('User speaking:', inputTx);
         }
         return;
       }
 
       if (msg.type === 'output_transcript') {
+        // AI is speaking - just log it, don't add to chat
         const t = (msg.text != null) ? String(msg.text) : '';
-        if (!t) return;
-        if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
-        botText = t;
-        setBubbleText(botBubble, botText, { markdown: true });
+        if (t) console.log('Wise Old AI:', t);
         return;
       }
 
       if (msg.type === 'model_text') {
+        // AI text - just log it
         const t = (msg.text != null) ? String(msg.text) : '';
-        if (!t) return;
-        if (!botBubble) botBubble = addMessage('bot', BOT_NAME, '');
-        botText += t;
-        setBubbleText(botBubble, botText, { markdown: true });
+        if (t) console.log('Wise Old AI text:', t);
         return;
       }
 
@@ -887,7 +888,8 @@ function initVoiceChat() {
             return;
           }
 
-          setVoiceChatState('Speaking…');
+          setOrbState('speaking');
+          setVoiceChatState('Wise Old AI is speaking...');
 
           const pcm16 = new Int16Array(b.buffer, b.byteOffset, Math.floor(b.byteLength / 2));
           const floats = new Float32Array(pcm16.length);
@@ -916,16 +918,20 @@ function initVoiceChat() {
       }
 
       if (msg.type === 'turn_complete') {
-        resetBotTurn();
-        if (ws && ws.readyState === WebSocket.OPEN) setVoiceChatState('Connected. Click “Talk” to speak.');
+        // AI finished speaking - back to listening mode
+        if (inConversation) {
+          setOrbState('listening');
+          setVoiceChatState('Listening... speak anytime');
+        }
       }
     });
 
     ws.addEventListener('close', (evt) => {
       ws = null;
       connecting = false;
-      talking = false;
+      inConversation = false;
       liveReady = false;
+      setOrbState('');
       pushToTalkBtn.disabled = true;
       pushToTalkBtn.classList.remove('is-talking');
       pushToTalkBtn.textContent = 'Talk';
@@ -997,7 +1003,7 @@ function initVoiceChat() {
         });
 
         micWorklet.port.onmessage = (evt) => {
-          if (!talking) return;
+          if (!inConversation) return;
           if (!liveReady) return;
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
@@ -1015,8 +1021,7 @@ function initVoiceChat() {
 
           const pcm = downsampleFloat32ToInt16(f32, micCtx.sampleRate, 16000);
           if (!pcm || !pcm.length) return;
-          if (!sentAudioThisTurn) console.log('First audio chunk captured via AudioWorklet');
-          sentAudioThisTurn = true;
+          console.log('Audio chunk sent to Gemini Live');
           try { ws.send(pcm.buffer); } catch { /* ignore */ }
         };
 
@@ -1036,14 +1041,13 @@ function initVoiceChat() {
     // ScriptProcessorNode is deprecated but broadly supported and sufficient here.
     micProc = micCtx.createScriptProcessor(2048, 1, 1);
     micProc.onaudioprocess = (e) => {
-      if (!talking) return;
+      if (!inConversation) return;
       if (!liveReady) return;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const ch0 = e.inputBuffer.getChannelData(0);
       const pcm = downsampleFloat32ToInt16(ch0, micCtx.sampleRate, 16000);
       if (!pcm || !pcm.length) return;
-      if (!sentAudioThisTurn) console.log('First audio chunk captured via ScriptProcessor');
-      sentAudioThisTurn = true;
+      console.log('Audio chunk sent to Gemini Live');
       try {
         ws.send(pcm.buffer);
       } catch {
@@ -1073,34 +1077,25 @@ function initVoiceChat() {
     micCtx = null;
   }
 
-  function startTalking() {
+  function startConversation() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (talking) return;
-    sentAudioThisTurn = false;
-    talking = true;
+    if (inConversation) return;
+    inConversation = true;
     pushToTalkBtn.classList.add('is-talking');
-    pushToTalkBtn.textContent = 'Stop & send';
+    pushToTalkBtn.textContent = 'End Conversation';
+    setOrbState('listening');
     
     // Pre-create and resume audio playback context during user gesture (required for mobile)
     ensurePlayContext();
   }
 
-  function stopTalking() {
-    if (!talking) return;
-    talking = false;
+  function endConversation() {
+    if (!inConversation) return;
+    inConversation = false;
     pushToTalkBtn.classList.remove('is-talking');
-    pushToTalkBtn.textContent = 'Talk';
-    console.log('stopTalking called, sentAudioThisTurn:', sentAudioThisTurn);
-    try {
-      if (sentAudioThisTurn && ws && ws.readyState === WebSocket.OPEN) {
-        console.log('Sending audio_stream_end to server');
-        ws.send(JSON.stringify({ type: 'audio_stream_end' }));
-      } else {
-        console.log('NOT sending audio_stream_end - sentAudioThisTurn:', sentAudioThisTurn, 'ws open:', ws && ws.readyState === WebSocket.OPEN);
-      }
-    } catch (err) {
-      console.error('Error sending audio_stream_end:', err);
-    }
+    pushToTalkBtn.textContent = 'Start Conversation';
+    setOrbState('');
+    console.log('Conversation ended');
   }
 
   voiceChatToggleBtn.addEventListener('click', async () => {
@@ -1116,7 +1111,10 @@ function initVoiceChat() {
   });
 
   if (voiceChatDisconnectBtn) {
-    voiceChatDisconnectBtn.addEventListener('click', () => disconnect());
+    voiceChatDisconnectBtn.addEventListener('click', () => {
+      endConversation();
+      disconnect();
+    });
   }
 
   // Click-to-talk toggle (call-style): connect once, then talk/stop to send.
@@ -1138,11 +1136,11 @@ function initVoiceChat() {
       return;
     }
 
-    if (!talking) {
-      startTalking();
+    if (!inConversation) {
+      startConversation();
       setVoiceChatState('Listening... just speak naturally. Gemini will respond when you pause.');
     } else {
-      stopTalking();
+      endConversation();
       if (sentAudioThisTurn) setVoiceChatState('Thinking…');
       else setVoiceChatState('No audio captured. Click “Talk” and speak again.');
     }
@@ -1151,7 +1149,7 @@ function initVoiceChat() {
   // Default UI state.
   setPanelOpen(false);
   setVoiceChatState('Voice chat is off.');
-  pushToTalkBtn.textContent = 'Talk';
+  pushToTalkBtn.textContent = 'Start Conversation';
   pushToTalkBtn.disabled = true;
 }
 
@@ -1923,4 +1921,10 @@ form.addEventListener('submit', async (e) => {
     loadHistory();
   }
 });
+
+
+
+
+
+
 
