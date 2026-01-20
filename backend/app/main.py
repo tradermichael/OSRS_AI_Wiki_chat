@@ -469,6 +469,14 @@ async def gemini_live_websocket(ws: WebSocket):
             )
         )
 
+    # Configure realtime input with automatic Voice Activity Detection (VAD)
+    # This makes it feel like a real phone call - Gemini detects when you stop talking
+    realtime_input_config = types.RealtimeInputConfig(
+        automatic_activity_detection=types.AutomaticActivityDetection(
+            disabled=False,  # Enable VAD
+        )
+    )
+
     # Gemini Live currently allows at most one response modality in the setup request.
     # We use AUDIO for voice chat, and enable transcripts via input/output_audio_transcription.
     connect_config = types.LiveConnectConfig(
@@ -477,6 +485,7 @@ async def gemini_live_websocket(ws: WebSocket):
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         speech_config=speech_config,
+        realtime_input_config=realtime_input_config,
     )
 
     # Create client and connect.
