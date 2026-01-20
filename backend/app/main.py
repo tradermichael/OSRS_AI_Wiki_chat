@@ -479,7 +479,12 @@ async def gemini_live_websocket(ws: WebSocket):
     realtime_input_config = types.RealtimeInputConfig(
         automatic_activity_detection=types.AutomaticActivityDetection(
             disabled=False,  # Enable VAD
-        )
+            silenceDurationMs=1500,  # Wait 1.5s of silence before considering speech ended
+        ),
+        # CRITICAL for multi-turn: include ALL input, not just first activity
+        turn_coverage=types.TurnCoverage.TURN_INCLUDES_ALL_INPUT,
+        # Allow user to interrupt the AI while it's speaking
+        activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
     )
 
     # Gemini Live currently allows at most one response modality in the setup request.
@@ -561,19 +566,27 @@ async def gemini_live_websocket(ws: WebSocket):
         try:
             async for message in session.receive():
                 message_count += 1
-                logger.debug("Received message #%d from Gemini Live: %s", message_count, type(message).__name__)
+                msg_type = type(message).__name__
+                
+                # Check for go_away or session termination signals
+                go_away = getattr(message, "go_away", None)
+                if go_away is not None:
+                    logger.warning("Gemini Live go_away received: %s", go_away)
+                
+                # Check for setup_complete (indicates session is ready for multi-turn)
+                setup_complete = getattr(message, "setup_complete", None)
+                if setup_complete is not None:
+                    logger.info("Gemini Live setup_complete received - session ready for multi-turn")
+                
                 sc = getattr(message, "server_content", None)
                 if sc is not None:
-                    logger.info("Gemini Live server_content received: interrupted=%s, turn_complete=%s, has_model_turn=%s",
-                               getattr(sc, "interrupted", False),
-                               getattr(sc, "turn_complete", False),
-                               getattr(sc, "model_turn", None) is not None)
+                    is_turn_complete = bool(getattr(sc, "turn_complete", False))
+                    logger.info("Gemini Live server_content #%d: turn_complete=%s", message_count, is_turn_complete)
                     await _send_server_content(sc)
 
                 # Some SDK versions expose a convenience text field.
                 msg_text = getattr(message, "text", None)
                 if msg_text:
-                    logger.info("Gemini Live text response: %s", msg_text[:100] if len(msg_text) > 100 else msg_text)
                     await ws.send_json({"type": "model_text", "text": msg_text})
             
             # If we reach here, the Gemini session ended normally (timeout/disconnect)
