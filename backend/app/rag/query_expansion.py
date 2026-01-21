@@ -107,6 +107,44 @@ def derive_search_queries(user_message: str) -> list[str]:
 
     msg_l = msg.lower()
 
+    # ── Location queries ───────────────────────────────────────────────────────
+    # Handle "where is the X in Y" patterns (e.g., "where is the bank in legends guild")
+    m_where_in = re.search(
+        r"\bwhere\s+(?:is|are)\s+(?:the\s+)?(.+?)\s+in\s+(?:the\s+)?(.+)$",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    if m_where_in:
+        what = re.sub(r"\s+", " ", (m_where_in.group(1) or "").strip()).strip(" ?!.\"'")
+        where = re.sub(r"\s+", " ", (m_where_in.group(2) or "").strip()).strip(" ?!.\"'")
+        if what and where:
+            # OSRS wiki often names location pages as "Place Feature" (e.g., "Legends' Guild bank")
+            queries.append(f"{where} {what}")
+            # Also try with apostrophe for guild names
+            if "guild" in where.lower() and "'" not in where:
+                where_apos = re.sub(r"(\w+)\s+(guild)", r"\1' \2", where, flags=re.IGNORECASE)
+                queries.append(f"{where_apos} {what}")
+            queries.append(f"{what} {where}")
+            queries.append(f"{where} {what} osrs")
+
+    # Handle "where to find X" patterns
+    m_find = re.search(r"\bwhere\s+(?:to|can\s+i|do\s+i)\s+find\s+(?:the\s+)?(.+)$", msg, flags=re.IGNORECASE)
+    if m_find:
+        subj = re.sub(r"\s+", " ", (m_find.group(1) or "").strip()).strip(" ?!.\"'")
+        if subj:
+            queries.append(subj)
+            queries.append(f"{subj} location")
+            queries.append(f"{subj} osrs")
+
+    # Handle "location of X" patterns
+    m_loc = re.search(r"\blocation\s+of\s+(?:the\s+)?(.+)$", msg, flags=re.IGNORECASE)
+    if m_loc:
+        subj = re.sub(r"\s+", " ", (m_loc.group(1) or "").strip()).strip(" ?!.\"'")
+        if subj:
+            queries.append(subj)
+            queries.append(f"{subj} location")
+            queries.append(f"{subj} osrs")
+
     new_player_intent = any(
         p in msg_l
         for p in (

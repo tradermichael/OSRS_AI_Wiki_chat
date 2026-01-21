@@ -460,7 +460,11 @@ async def gemini_live_websocket(ws: WebSocket):
         "Use archaic language, metaphors about the stars and elements, and a raspy, weathered tone. "
         "Speak with great gravitas as if you are imparting ancient secrets and guidance. "
         "You help adventurers with quests, skills, monsters, items, and all matters of the realm. "
-        "Keep your knowledge accurate to Old School RuneScape."
+        "Keep your knowledge accurate to Old School RuneScape. "
+        "IMPORTANT: You have access to the search_osrs_wiki tool. Use it to look up accurate information "
+        "about quests, items, monsters, bosses, skills, drop rates, requirements, and strategies. "
+        "Always use the tool when the adventurer asks about specific game mechanics, stats, or guides. "
+        "After receiving search results, summarize the key information in your mystical wizard voice."
     )
 
     voice_name = (start_msg.get("voiceName") or default_voice or "").strip() or None
@@ -473,6 +477,37 @@ async def gemini_live_websocket(ws: WebSocket):
                 prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
             )
         )
+
+    # Define tools for function calling - enables RAG for voice chat
+    # The wiki search tool lets Gemini look up accurate OSRS information
+    wiki_search_tool = types.Tool(
+        function_declarations=[
+            types.FunctionDeclaration(
+                name="search_osrs_wiki",
+                description=(
+                    "Search the Old School RuneScape Wiki for information about quests, items, monsters, "
+                    "skills, bosses, NPCs, locations, or any other OSRS topic. Use this tool whenever "
+                    "you need accurate, up-to-date information about OSRS that you're not certain about. "
+                    "Always search before answering questions about specific stats, requirements, drop rates, "
+                    "quest guides, boss strategies, or game mechanics."
+                ),
+                parameters=types.Schema(
+                    type=types.Type.OBJECT,
+                    properties={
+                        "query": types.Schema(
+                            type=types.Type.STRING,
+                            description=(
+                                "The search query. Be specific - use exact item names, monster names, "
+                                "quest names, or skill names. For strategies, include '/Strategies' suffix. "
+                                "Examples: 'Abyssal whip', 'Zulrah/Strategies', 'Dragon Slayer II requirements'"
+                            ),
+                        ),
+                    },
+                    required=["query"],
+                ),
+            ),
+        ]
+    )
 
     # Configure realtime input with automatic Voice Activity Detection (VAD)
     # This makes it feel like a real phone call - Gemini detects when you stop talking
@@ -498,6 +533,8 @@ async def gemini_live_websocket(ws: WebSocket):
         realtimeInputConfig=realtime_input_config,
         # Enable transparent session resumption for multi-turn conversation
         sessionResumption=types.SessionResumptionConfig(transparent=True),
+        # Enable tool use for RAG - wiki search
+        tools=[wiki_search_tool],
     )
 
     # Create client and connect.
@@ -562,6 +599,54 @@ async def gemini_live_websocket(ws: WebSocket):
             logger.info("Gemini Live turn_complete received")
             await ws.send_json({"type": "turn_complete"})
 
+    async def _execute_wiki_search(query: str) -> str:
+        """Execute a wiki search for the tool call and return formatted results."""
+        query = (query or "").strip()
+        if not query:
+            return "No query provided. Please specify what to search for."
+        
+        logger.info("Executing wiki search for voice chat: %s", query)
+        
+        prefixes = allowed_url_prefixes()
+        
+        try:
+            # First try the local/fast wiki lookup
+            chunks = await live_query_chunks(
+                query,
+                allowed_url_prefixes=prefixes,
+                max_pages_per_source=2,
+                max_chunks_total=4,  # Keep it concise for voice
+            )
+            
+            # If no results from wiki, try web search
+            if not chunks and settings.google_cse_api_key and settings.google_cse_cx:
+                web_chunks, _ = await live_search_web_and_fetch_chunks(
+                    query,
+                    allowed_url_prefixes=prefixes,
+                    max_results=3,
+                    max_chunks_total=4,
+                )
+                chunks = web_chunks
+            
+            if not chunks:
+                return f"No information found for '{query}'. The topic may not exist in the OSRS Wiki, or try rephrasing your search."
+            
+            # Format results for Gemini to speak
+            result_parts = []
+            for i, chunk in enumerate(chunks[:4], 1):  # Max 4 chunks
+                title = getattr(chunk, "title", None) or "OSRS Wiki"
+                text = getattr(chunk, "text", "") or ""
+                # Truncate long chunks for voice (keep it speakable)
+                if len(text) > 800:
+                    text = text[:800] + "..."
+                result_parts.append(f"--- {title} ---\n{text}")
+            
+            return "\n\n".join(result_parts)
+            
+        except Exception as exc:
+            logger.exception("Wiki search failed for voice chat: %s", exc)
+            return f"Wiki search failed: {exc}. Please try again or ask in a different way."
+
     async def _pump_from_gemini(session) -> None:
         logger.info("Starting to pump messages from Gemini Live")
         message_count = 0
@@ -606,6 +691,49 @@ async def gemini_live_websocket(ws: WebSocket):
                 msg_text = getattr(message, "text", None)
                 if msg_text:
                     await ws.send_json({"type": "model_text", "text": msg_text})
+
+                # Handle tool calls - this is where RAG happens for voice chat!
+                tool_call = getattr(message, "tool_call", None)
+                if tool_call is not None:
+                    function_calls = getattr(tool_call, "function_calls", None) or []
+                    if function_calls:
+                        logger.info("Gemini Live TOOL_CALL received with %d function(s)", len(function_calls))
+                        # Notify client that we're doing a wiki lookup
+                        with contextlib.suppress(Exception):
+                            await ws.send_json({"type": "tool_call", "detail": "Searching OSRS Wiki..."})
+                        
+                        function_responses = []
+                        for fc in function_calls:
+                            fc_name = getattr(fc, "name", None) or ""
+                            fc_args = getattr(fc, "args", None) or {}
+                            fc_id = getattr(fc, "id", None)
+                            
+                            logger.info("Tool call: name=%s args=%s", fc_name, fc_args)
+                            
+                            if fc_name == "search_osrs_wiki":
+                                query = fc_args.get("query", "")
+                                result_text = await _execute_wiki_search(query)
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        id=fc_id,
+                                        name=fc_name,
+                                        response={"result": result_text},
+                                    )
+                                )
+                            else:
+                                # Unknown function - return error
+                                function_responses.append(
+                                    types.FunctionResponse(
+                                        id=fc_id,
+                                        name=fc_name,
+                                        response={"error": f"Unknown function: {fc_name}"},
+                                    )
+                                )
+                        
+                        # Send tool responses back to Gemini
+                        if function_responses:
+                            logger.info("Sending %d tool response(s) to Gemini Live", len(function_responses))
+                            await session.send_tool_response(function_responses=function_responses)
             
             # If we reach here, the Gemini session ended normally (timeout/disconnect)
             logger.warning("Gemini Live session ENDED after %d messages (last turn_complete at #%d)", 

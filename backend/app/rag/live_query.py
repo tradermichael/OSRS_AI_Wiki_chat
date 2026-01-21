@@ -24,6 +24,35 @@ def _query_title_hint(query: str) -> str:
     """Try to derive a likely page title from a query."""
     q = (query or "").strip()
 
+    # ── Location queries ───────────────────────────────────────────────────────
+    # Handle "where is the X in Y" or "where is X in Y" -> "Y X"
+    # Example: "where is the bank in legends guild" -> "Legends' Guild bank"
+    m_where_in = re.search(
+        r"\bwhere\s+(?:is|are)\s+(?:the\s+)?(.+?)\s+in\s+(?:the\s+)?(.+)$",
+        q,
+        flags=re.IGNORECASE,
+    )
+    if m_where_in:
+        what = re.sub(r"\s+", " ", (m_where_in.group(1) or "").strip()).strip(" ?!.\"'")
+        where = re.sub(r"\s+", " ", (m_where_in.group(2) or "").strip()).strip(" ?!.\"'")
+        if what and where and 1 <= len(what) <= 40 and 1 <= len(where) <= 60:
+            # OSRS wiki often names location pages as "Place Feature" (e.g., "Legends' Guild bank")
+            return f"{where} {what}"
+
+    # Handle "X location" or "location of X" -> "X"
+    m_location = re.search(r"\blocation\s+(?:of\s+)?(?:the\s+)?(.+)$", q, flags=re.IGNORECASE)
+    if m_location:
+        subj = re.sub(r"\s+", " ", (m_location.group(1) or "").strip()).strip(" ?!.\"'")
+        if subj and 1 <= len(subj) <= 80:
+            return subj
+
+    # Handle "where to find X" -> "X"
+    m_find = re.search(r"\bwhere\s+(?:to|can\s+i|do\s+i)\s+find\s+(?:the\s+)?(.+)$", q, flags=re.IGNORECASE)
+    if m_find:
+        subj = re.sub(r"\s+", " ", (m_find.group(1) or "").strip()).strip(" ?!.\"'")
+        if subj and 1 <= len(subj) <= 80:
+            return subj
+
     # If the query already contains an explicit /Strategies title, prefer that.
     m_strat = re.search(r"^\s*([^/]{2,120})\s*/\s*strategies\b", q, flags=re.IGNORECASE)
     if m_strat:

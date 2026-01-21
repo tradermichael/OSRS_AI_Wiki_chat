@@ -739,9 +739,10 @@ function initVoiceChat() {
   // Orb state management
   function setOrbState(state) {
     if (!voiceChatOrbEl) return;
-    voiceChatOrbEl.classList.remove('listening', 'speaking');
+    voiceChatOrbEl.classList.remove('listening', 'speaking', 'thinking');
     if (state === 'listening') voiceChatOrbEl.classList.add('listening');
     else if (state === 'speaking') voiceChatOrbEl.classList.add('speaking');
+    else if (state === 'thinking') voiceChatOrbEl.classList.add('thinking');
   }
 
   function waitForReady(timeoutMs = 8000) {
@@ -944,6 +945,13 @@ function initVoiceChat() {
           setOrbState('listening');
           setVoiceChatState('Listening... speak anytime');
         }
+      }
+
+      // Handle tool calls (wiki search for RAG)
+      if (msg.type === 'tool_call') {
+        console.log('Gemini is searching the wiki:', msg.detail);
+        setOrbState('thinking');
+        setVoiceChatState('🔍 ' + (msg.detail || 'Searching OSRS Wiki...'));
       }
 
       if (msg.type === 'session_ended') {

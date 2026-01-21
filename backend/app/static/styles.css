@@ -938,6 +938,16 @@ body {
   animation: pulse-speaking 0.5s ease-in-out infinite;
 }
 
+.voice-chat__orb.thinking {
+  background: radial-gradient(circle at 30% 30%, #87ceeb, #4169e1);
+  box-shadow: 
+    0 0 15px rgba(65, 105, 225, 0.8),
+    0 0 30px rgba(65, 105, 225, 0.5),
+    0 0 45px rgba(65, 105, 225, 0.3),
+    inset 0 -2px 4px rgba(0, 0, 0, 0.3);
+  animation: pulse-thinking 0.8s ease-in-out infinite;
+}
+
 @keyframes pulse-listening {
   0%, 100% { transform: scale(1); opacity: 1; }
   50% { transform: scale(1.1); opacity: 0.85; }
@@ -946,6 +956,11 @@ body {
 @keyframes pulse-speaking {
   0%, 100% { transform: scale(1); }
   50% { transform: scale(1.15); }
+}
+
+@keyframes pulse-thinking {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.05); opacity: 0.7; }
 }
 
 .voice-chat__state {
