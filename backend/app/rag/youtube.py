@@ -596,3 +596,61 @@ async def quest_youtube_videos_with_summaries(*, user_message: str) -> list[dict
             summary = "Quest guide video."
         out.append({"title": v.title, "url": v.url, "channel": v.channel, "summary": summary[:600]})
     return out
+
+
+async def general_youtube_fallback_chunks(*, user_message: str, max_videos: int = 3) -> list[RetrievedChunk]:
+    """General YouTube fallback when no wiki/web sources are found.
+
+    Searches for OSRS-related videos matching the user's question and returns
+    short citable chunks from descriptions or transcripts.
+    """
+
+    api_key = settings.youtube_api_key
+    if not api_key:
+        return []
+
+    msg = (user_message or "").strip()
+    if not msg:
+        return []
+
+    # Build a general OSRS query from the user message
+    q = f"osrs {msg}"
+    # Cap query length
+    q = q[:200].strip()
+
+    try:
+        videos = await youtube_search_videos(api_key=api_key, query=q, max_results=max(1, int(max_videos) + 2))
+    except Exception:
+        return []
+
+    # Filter to OSRS-relevant videos
+    videos = [v for v in videos if _is_osrs_relevant(v)][:max(1, int(max_videos))]
+    if not videos:
+        return []
+
+    out: list[RetrievedChunk] = []
+    for v in videos:
+        # Prefer a short transcript excerpt when available, otherwise description.
+        transcript = None
+        try:
+            transcript = await youtube_fetch_transcript(v.video_id)
+        except Exception:
+            transcript = None
+
+        body = (transcript or v.description or "").strip()
+        if not body:
+            body = "YouTube video about OSRS (no transcript/description available)."
+
+        channel = (v.channel or "").strip()
+        head = f"YouTube ({channel}): {v.title}" if channel else f"YouTube: {v.title}"
+        text = f"{head}\n\n{body}"
+
+        out.append(
+            RetrievedChunk(
+                text=text[:1200],
+                url=v.url,
+                title=v.title[:120],
+            )
+        )
+
+    return out

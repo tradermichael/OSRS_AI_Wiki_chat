@@ -237,7 +237,13 @@ async def live_query_chunks(
                 titles = []
 
         if hint and not hint.lower().endswith(subpage_suffixes):
-            preferred = [hint, f"{hint}/Strategies"]
+            preferred = [hint]
+            # For guild-related queries, also try apostrophe variant (e.g., "legends guild" -> "Legends' Guild")
+            if "guild" in hint.lower() and "'" not in hint:
+                hint_apos = re.sub(r"(\w+)\s+(guild)", r"\1' \2", hint, flags=re.IGNORECASE)
+                if hint_apos != hint:
+                    preferred.insert(0, hint_apos)
+            preferred.append(f"{hint}/Strategies")
             for p in reversed(preferred):
                 if p and p not in titles:
                     titles.insert(0, p)
@@ -250,7 +256,13 @@ async def live_query_chunks(
                 if base and base != hint:
                     titles.append(base)
             else:
-                titles = [hint, f"{hint}/Strategies"]
+                titles = [hint]
+                # For guild-related queries, also try apostrophe variant
+                if "guild" in hint.lower() and "'" not in hint:
+                    hint_apos = re.sub(r"(\w+)\s+(guild)", r"\1' \2", hint, flags=re.IGNORECASE)
+                    if hint_apos != hint:
+                        titles.insert(0, hint_apos)
+                titles.append(f"{hint}/Strategies")
 
         if not titles:
             return []

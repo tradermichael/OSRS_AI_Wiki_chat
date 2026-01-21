@@ -37,6 +37,7 @@ from .rag.youtube import (
     quest_youtube_insight_chunks,
     opinion_youtube_insight_chunks,
     combat_youtube_insight_chunks,
+    general_youtube_fallback_chunks,
 )
 from .rag.reddit import reddit_search_chunks
 
@@ -2767,6 +2768,30 @@ async def _chat_impl(
                 prefixes=prefixes,
                 allow_external_sources=allow_external_sources,
             )
+
+    # ── YouTube fallback ───────────────────────────────────────────────────────
+    # If we still have no chunks, try YouTube as a last resort.
+    if not prompt_chunks and settings.youtube_api_key:
+        await _status("Checking the tavern's crystal ball (YouTube)...")
+        try:
+            yt_chunks = await general_youtube_fallback_chunks(
+                user_message=(raw_user_message or user_message or retrieval_seed),
+                max_videos=3,
+            )
+            if yt_chunks:
+                actions.append("Found YouTube videos as fallback sources.")
+                chunks = yt_chunks
+                allow_external_sources = True
+                prompt_chunks = _build_prompt_chunks(
+                    chunks=chunks,
+                    retrieval_seed=retrieval_seed,
+                    user_question=(raw_user_message or user_message or ""),
+                    topic_hint=topic_hint,
+                    prefixes=prefixes,
+                    allow_external_sources=True,
+                )
+        except Exception:
+            pass
 
     if not prompt_chunks:
         await _status("My shelves come up empty; no citable pages found.")
