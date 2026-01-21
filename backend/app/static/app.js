@@ -822,6 +822,7 @@ function initVoiceChat() {
     });
 
     ws.addEventListener('message', async (evt) => {
+      try {
       let msg = null;
       try { msg = JSON.parse(evt.data); } catch (parseErr) {
         console.warn('WebSocket message parse error:', parseErr, 'data type:', typeof evt.data);
@@ -947,49 +948,61 @@ function initVoiceChat() {
 
       if (msg.type === 'session_ended') {
         // Gemini Live session ended after turn - auto-reconnect for multi-turn
-        console.warn('Gemini Live session ended:', msg.detail);
-        const wasInConversation = inConversation;
+        console.log('Gemini Live session ended, auto-reconnecting...', msg.detail);
         
-        // Auto-reconnect if user was in conversation
-        if (wasInConversation) {
-          isAutoReconnecting = true;  // Prevent close handler from resetting state
-          setOrbState('');
-          setVoiceChatState('Reconnecting...');
-          
-          // Close old connection and reconnect
-          try { if (ws) ws.close(); } catch { /* ignore */ }
-          ws = null;
-          liveReady = false;
-          
-          // Reconnect after a short delay
-          setTimeout(async () => {
-            try {
-              inConversation = true;  // Keep conversation going
-              await connect();
-              const ok = await waitForReady(10000);
-              isAutoReconnecting = false;
-              if (ok) {
-                setOrbState('listening');
-                setVoiceChatState('Listening... speak anytime');
-              } else {
-                throw new Error('Connection timeout');
-              }
-            } catch (err) {
-              console.error('Auto-reconnect failed:', err);
-              isAutoReconnecting = false;
-              inConversation = false;
-              setOrbState('');
-              setVoiceChatState('Reconnection failed. Click "Start Conversation" to try again.');
-              pushToTalkBtn.textContent = 'Start Conversation';
-              pushToTalkBtn.classList.remove('is-talking');
-            }
-          }, 500);
-        } else {
+        // Only auto-reconnect if user was in conversation
+        if (!inConversation) {
           setOrbState('');
           setVoiceChatState('Session ended. Click "Start Conversation" to continue.');
           pushToTalkBtn.textContent = 'Start Conversation';
+          return;
         }
+        
+        // Set reconnecting state
+        isAutoReconnecting = true;
+        setOrbState('');
+        setVoiceChatState('Reconnecting...');
+        pushToTalkBtn.disabled = true;  // Prevent button clicks during reconnect
+        
+        // Close old connection
+        const oldWs = ws;
+        ws = null;
+        liveReady = false;
+        try { if (oldWs) oldWs.close(); } catch { /* ignore */ }
+        
+        // Reconnect after a short delay
+        setTimeout(async () => {
+          try {
+            console.log('Auto-reconnect: connecting...');
+            await connect();
+            console.log('Auto-reconnect: waiting for ready...');
+            const ok = await waitForReady(10000);
+            
+            isAutoReconnecting = false;
+            pushToTalkBtn.disabled = false;
+            
+            if (ok && inConversation) {
+              console.log('Auto-reconnect: success!');
+              setOrbState('listening');
+              setVoiceChatState('Listening... speak anytime');
+            } else {
+              throw new Error('Connection timeout or conversation ended');
+            }
+          } catch (err) {
+            console.error('Auto-reconnect failed:', err);
+            isAutoReconnecting = false;
+            inConversation = false;
+            setOrbState('');
+            setVoiceChatState('Reconnection failed. Click "Start Conversation" to try again.');
+            pushToTalkBtn.textContent = 'Start Conversation';
+            pushToTalkBtn.classList.remove('is-talking');
+            pushToTalkBtn.disabled = false;
+          }
+        }, 300);
       }
+    } catch (handlerErr) {
+      console.error('WebSocket message handler error (caught to prevent socket crash):', handlerErr);
+    }
     });
 
     ws.addEventListener('close', (evt) => {
@@ -1219,7 +1232,7 @@ function initVoiceChat() {
       setVoiceChatState('Listening... just speak naturally. Gemini will respond when you pause.');
     } else {
       endConversation();
-      if (sentAudioThisTurn) setVoiceChatState('Thinking…');
+      setVoiceChatState('Conversation ended.');
       else setVoiceChatState('No audio captured. Click “Talk” and speak again.');
     }
   });
