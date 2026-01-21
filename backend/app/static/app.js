@@ -1000,9 +1000,9 @@ function initVoiceChat() {
           }
         }, 300);
       }
-    } catch (handlerErr) {
-      console.error('WebSocket message handler error (caught to prevent socket crash):', handlerErr);
-    }
+      } catch (handlerErr) {
+        console.error('WebSocket message handler error (caught to prevent socket crash):', handlerErr);
+      }
     });
 
     ws.addEventListener('close', (evt) => {
@@ -1233,7 +1233,6 @@ function initVoiceChat() {
     } else {
       endConversation();
       setVoiceChatState('Conversation ended.');
-      else setVoiceChatState('No audio captured. Click “Talk” and speak again.');
     }
   });
 
