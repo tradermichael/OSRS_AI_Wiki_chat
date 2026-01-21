@@ -1985,6 +1985,15 @@ async def _chat_impl(
 
         if th:
             return th
+
+        # If no topic hint, prefer derived queries over raw (they're optimized for search).
+        # Pick the first derived query that looks like a title (not just keywords).
+        if queries:
+            for q in queries:
+                qq = (q or "").strip()
+                if qq and len(qq) >= 6 and not qq.endswith(" osrs"):
+                    return qq
+
         if raw_q and len(raw_q) >= 8:
             return raw_q
         # Otherwise prefer the longest derived query (usually the least lossy).
@@ -2169,7 +2178,8 @@ async def _chat_impl(
                     max_results=5,
                     max_chunks_total=8,
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning(f"CSE search failed for query '{primary_q}': {e}")
                 web_chunks, web_hits = ([], [])
 
             # Even if we couldn't fetch chunks, still show a sample of what the web search returned.
