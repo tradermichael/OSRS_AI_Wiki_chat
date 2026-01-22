@@ -710,6 +710,7 @@ function initVoiceChat() {
   let inputTx = '';
   let readyWaitResolve = null;
   let readyWaitTimer = null;
+  let sessionResumptionHandle = null;  // For resuming sessions after disconnect
 
   let micStream = null;
   let micCtx = null;
@@ -814,11 +815,14 @@ function initVoiceChat() {
       setVoiceChatState('Connected. Starting session…');
       if (voiceChatDisconnectBtn) voiceChatDisconnectBtn.hidden = false;
       pushToTalkBtn.textContent = 'Starting…';
-      // Start the Live session.
+      // Start the Live session, including resumption handle if reconnecting
       try {
-        ws.send(JSON.stringify({
-          type: 'start',
-        }));
+        const startMsg = { type: 'start' };
+        if (isAutoReconnecting && sessionResumptionHandle) {
+          startMsg.resumption_handle = sessionResumptionHandle;
+          console.log('Sending resumption handle for session continuity');
+        }
+        ws.send(JSON.stringify(startMsg));
       } catch { /* ignore */ }
     });
 
@@ -952,6 +956,14 @@ function initVoiceChat() {
         console.log('Gemini is searching the wiki:', msg.detail);
         setOrbState('thinking');
         setVoiceChatState('🔍 ' + (msg.detail || 'Searching OSRS Wiki...'));
+      }
+
+      // Handle session resumption token - store for reconnection
+      if (msg.type === 'session_resumption') {
+        if (msg.handle) {
+          sessionResumptionHandle = msg.handle;
+          console.log('Session resumption handle received, resumable:', msg.resumable);
+        }
       }
 
       if (msg.type === 'session_ended') {
@@ -1183,6 +1195,12 @@ function initVoiceChat() {
     pushToTalkBtn.classList.add('is-talking');
     pushToTalkBtn.textContent = 'End Conversation';
     setOrbState('listening');
+    
+    // Clear resumption handle when user explicitly starts a new conversation
+    // (We only want to use it during auto-reconnect)
+    if (!isAutoReconnecting) {
+      sessionResumptionHandle = null;
+    }
     
     // Pre-create and resume audio playback context during user gesture (required for mobile)
     ensurePlayContext();

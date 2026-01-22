@@ -437,6 +437,11 @@ async def gemini_live_websocket(ws: WebSocket):
         await ws.close(code=1003)
         return
 
+    # Extract resumption handle for session continuity
+    resumption_handle = (start_msg.get("resumption_handle") or "").strip() or None
+    if resumption_handle:
+        logger.info("Received resumption handle for session continuity: %s...", resumption_handle[:50])
+
     # Allow the client to request a specific live model (still validated on the server).
     requested_model = _normalize_model_name(str(start_msg.get("model") or start_msg.get("modelId") or ""))
     if requested_model:
@@ -525,6 +530,17 @@ async def gemini_live_websocket(ws: WebSocket):
 
     # Gemini Live currently allows at most one response modality in the setup request.
     # We use AUDIO for voice chat, and enable transcripts via input/output_audio_transcription.
+    
+    # Configure session resumption - use handle if provided for reconnection
+    if resumption_handle:
+        session_resumption_config = types.SessionResumptionConfig(
+            transparent=True,
+            handle=resumption_handle,
+        )
+        logger.info("Using resumption handle for session continuity")
+    else:
+        session_resumption_config = types.SessionResumptionConfig(transparent=True)
+    
     connect_config = types.LiveConnectConfig(
         responseModalities=[types.Modality.AUDIO],
         systemInstruction=system_instruction,
@@ -533,7 +549,7 @@ async def gemini_live_websocket(ws: WebSocket):
         speechConfig=speech_config,
         realtimeInputConfig=realtime_input_config,
         # Enable transparent session resumption for multi-turn conversation
-        sessionResumption=types.SessionResumptionConfig(transparent=True),
+        sessionResumption=session_resumption_config,
         # Enable tool use for RAG - wiki search
         tools=[wiki_search_tool],
     )
@@ -675,10 +691,21 @@ async def gemini_live_websocket(ws: WebSocket):
                     with contextlib.suppress(Exception):
                         await ws.send_json({"type": "setup_complete"})
                 
-                # Check for session resumption updates
+                # Check for session resumption updates - send token to client for reconnection
                 session_resumption_update = getattr(message, "session_resumption_update", None)
                 if session_resumption_update is not None:
-                    logger.info("Gemini Live SESSION_RESUMPTION_UPDATE: %s", session_resumption_update)
+                    # Extract the resumable flag and handle from the update
+                    resumable = getattr(session_resumption_update, "resumable", False)
+                    new_handle = getattr(session_resumption_update, "new_handle", None)
+                    logger.info("Gemini Live SESSION_RESUMPTION_UPDATE: resumable=%s new_handle=%s", 
+                               resumable, new_handle[:50] if new_handle else None)
+                    if new_handle:
+                        with contextlib.suppress(Exception):
+                            await ws.send_json({
+                                "type": "session_resumption",
+                                "resumable": resumable,
+                                "handle": new_handle,
+                            })
                 
                 sc = getattr(message, "server_content", None)
                 if sc is not None:
