@@ -625,56 +625,74 @@ async def gemini_live_websocket(ws: WebSocket):
         logger.info("Executing wiki search for voice chat: %s", query)
         
         prefixes = allowed_url_prefixes()
+        chunks = []
         
         try:
-            # First try the local/fast wiki lookup
-            chunks = await live_query_chunks(
-                query,
-                allowed_url_prefixes=prefixes,
-                max_pages_per_source=2,
-                max_chunks_total=4,  # Keep it concise for voice
-            )
-            
-            # If no results from wiki, try web search
-            if not chunks and settings.google_cse_api_key and settings.google_cse_cx:
-                web_chunks, _ = await live_search_web_and_fetch_chunks(
+            # Use a timeout to ensure we don't block too long
+            # Gemini Live sessions have short inactivity timeouts
+            async with asyncio.timeout(8.0):  # 8 second max for tool execution
+                # First try the local/fast wiki lookup
+                chunks = await live_query_chunks(
                     query,
                     allowed_url_prefixes=prefixes,
-                    max_results=3,
-                    max_chunks_total=4,
+                    max_pages_per_source=2,
+                    max_chunks_total=3,  # Keep it concise for voice
                 )
-                chunks = web_chunks
-            
-            if not chunks:
-                return f"No information found for '{query}'. The topic may not exist in the OSRS Wiki, or try rephrasing your search."
-            
-            # Format results for Gemini to speak
-            result_parts = []
-            for i, chunk in enumerate(chunks[:4], 1):  # Max 4 chunks
-                title = getattr(chunk, "title", None) or "OSRS Wiki"
-                text = getattr(chunk, "text", "") or ""
-                # Truncate long chunks for voice (keep it speakable)
-                if len(text) > 800:
-                    text = text[:800] + "..."
-                result_parts.append(f"--- {title} ---\n{text}")
-            
-            return "\n\n".join(result_parts)
-            
+                
+                # If no results from wiki, try web search (but with shorter timeout)
+                if not chunks and settings.google_cse_api_key and settings.google_cse_cx:
+                    try:
+                        async with asyncio.timeout(4.0):  # Shorter timeout for CSE
+                            web_chunks, _ = await live_search_web_and_fetch_chunks(
+                                query,
+                                allowed_url_prefixes=prefixes,
+                                max_results=2,
+                                max_chunks_total=3,
+                            )
+                            chunks = web_chunks
+                    except asyncio.TimeoutError:
+                        logger.warning("CSE search timed out for voice chat")
+        except asyncio.TimeoutError:
+            logger.warning("Wiki search timed out for voice chat query: %s", query)
+            return f"Search for '{query}' is taking too long. Please try a simpler query."
         except Exception as exc:
             logger.exception("Wiki search failed for voice chat: %s", exc)
             return f"Wiki search failed: {exc}. Please try again or ask in a different way."
+        
+        if not chunks:
+            return f"No information found for '{query}'. The topic may not exist in the OSRS Wiki, or try rephrasing your search."
+        
+        # Format results for Gemini to speak
+        result_parts = []
+        for i, chunk in enumerate(chunks[:3], 1):  # Max 3 chunks for voice
+            title = getattr(chunk, "title", None) or "OSRS Wiki"
+            text = getattr(chunk, "text", "") or ""
+            # Truncate long chunks for voice (keep it speakable)
+            if len(text) > 600:
+                text = text[:600] + "..."
+            result_parts.append(f"--- {title} ---\n{text}")
+        
+        return "\n\n".join(result_parts)
 
     async def _pump_from_gemini(session) -> None:
         logger.info("Starting to pump messages from Gemini Live")
         message_count = 0
         last_turn_complete_at = 0
+        pending_tool_execution = False
         try:
             async for message in session.receive():
                 message_count += 1
+                
+                # Log raw message type for debugging
+                msg_type = type(message).__name__
+                msg_attrs = [attr for attr in dir(message) if not attr.startswith('_') and getattr(message, attr, None) is not None]
+                logger.info("Gemini Live RAW message #%d: type=%s, pending_tool=%s, attrs=%s", 
+                           message_count, msg_type, pending_tool_execution, msg_attrs[:10])
                 msg_type = type(message).__name__
                 
                 # Log all message types to understand session lifecycle
-                logger.info("Gemini Live message #%d: type=%s", message_count, msg_type)
+                logger.info("Gemini Live message #%d: type=%s pending_tool=%s", 
+                           message_count, msg_type, pending_tool_execution)
                 
                 # Check for go_away or session termination signals
                 go_away = getattr(message, "go_away", None)
@@ -712,8 +730,16 @@ async def gemini_live_websocket(ws: WebSocket):
                     is_turn_complete = bool(getattr(sc, "turn_complete", False))
                     if is_turn_complete:
                         last_turn_complete_at = message_count
-                        logger.info("Gemini Live TURN_COMPLETE at message #%d", message_count)
-                    await _send_server_content(sc)
+                        # Don't log/send turn_complete if we're about to handle a tool call
+                        # The tool_call might be in this same message or the next
+                        has_tool_call = getattr(message, "tool_call", None) is not None
+                        if has_tool_call:
+                            logger.info("Gemini Live TURN_COMPLETE with tool_call at message #%d (deferring)", message_count)
+                        else:
+                            logger.info("Gemini Live TURN_COMPLETE at message #%d", message_count)
+                            await _send_server_content(sc)
+                    else:
+                        await _send_server_content(sc)
 
                 # Some SDK versions expose a convenience text field.
                 msg_text = getattr(message, "text", None)
@@ -726,6 +752,7 @@ async def gemini_live_websocket(ws: WebSocket):
                     function_calls = getattr(tool_call, "function_calls", None) or []
                     if function_calls:
                         logger.info("Gemini Live TOOL_CALL received with %d function(s)", len(function_calls))
+                        pending_tool_execution = True
                         # Notify client that we're doing a wiki lookup
                         with contextlib.suppress(Exception):
                             await ws.send_json({"type": "tool_call", "detail": "Searching OSRS Wiki..."})
@@ -736,11 +763,18 @@ async def gemini_live_websocket(ws: WebSocket):
                             fc_args = getattr(fc, "args", None) or {}
                             fc_id = getattr(fc, "id", None)
                             
-                            logger.info("Tool call: name=%s args=%s", fc_name, fc_args)
+                            logger.info("Tool call: name=%s args=%s id=%s", fc_name, fc_args, fc_id)
                             
                             if fc_name == "search_osrs_wiki":
                                 query = fc_args.get("query", "")
-                                result_text = await _execute_wiki_search(query)
+                                try:
+                                    logger.info("Starting wiki search for: %s", query)
+                                    result_text = await _execute_wiki_search(query)
+                                    logger.info("Wiki search completed, result length: %d", len(result_text))
+                                except Exception as search_exc:
+                                    logger.exception("Wiki search failed: %s", search_exc)
+                                    result_text = f"Search failed: {search_exc}"
+                                
                                 function_responses.append(
                                     types.FunctionResponse(
                                         id=fc_id,
@@ -760,8 +794,15 @@ async def gemini_live_websocket(ws: WebSocket):
                         
                         # Send tool responses back to Gemini
                         if function_responses:
-                            logger.info("Sending %d tool response(s) to Gemini Live", len(function_responses))
-                            await session.send_tool_response(function_responses=function_responses)
+                            try:
+                                logger.info("Sending %d tool response(s) to Gemini Live", len(function_responses))
+                                await session.send_tool_response(function_responses=function_responses)
+                                logger.info("Tool response sent successfully - waiting for Gemini to continue...")
+                                pending_tool_execution = False  # Reset the flag after successful send
+                            except Exception as send_exc:
+                                logger.exception("Failed to send tool response: %s", send_exc)
+                                pending_tool_execution = False
+                                # The session may have closed during our wiki search
             
             # If we reach here, the Gemini session ended normally (timeout/disconnect)
             logger.warning("Gemini Live session ENDED after %d messages (last turn_complete at #%d)", 
